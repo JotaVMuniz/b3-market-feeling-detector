@@ -28,7 +28,9 @@ def sample_news():
             "link": "https://example.com/news1",
             "published_at": "2026-03-26T10:00:00",
             "source": "TestSource",
-            "collected_at": "2026-03-26T11:00:00"
+            "collected_at": "2026-03-26T11:00:00",
+            "sentiment": "positivo",
+            "confidence": 0.85
         },
         {
             "title": "Test News 2",
@@ -36,7 +38,9 @@ def sample_news():
             "link": "https://example.com/news2",
             "published_at": "2026-03-25T10:00:00",
             "source": "TestSource",
-            "collected_at": "2026-03-26T11:00:00"
+            "collected_at": "2026-03-26T11:00:00",
+            "sentiment": "negativo",
+            "confidence": 0.72
         }
     ]
 

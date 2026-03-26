@@ -24,6 +24,7 @@ from src.ingestion.fetch_news import fetch_all_news, deduplicate_news
 from src.processing.clean_news import clean_news_batch, validate_news_entry
 from src.storage.save_raw import save_raw_news
 from src.storage.database import NewsDatabase
+from src.nlp.sentiment import classify_batch
 
 
 def run_pipeline() -> None:
@@ -34,8 +35,9 @@ def run_pipeline() -> None:
     1. Fetch news from all configured RSS sources
     2. Deduplicate news based on URL
     3. Clean and process raw data
-    4. Save raw data to JSON files
-    5. Insert cleaned data into SQLite database
+    4. Classify sentiment using LLM
+    5. Save raw data to JSON files
+    6. Insert cleaned data into SQLite database
     """
     logger.info("=" * 60)
     logger.info("Starting news ingestion pipeline")
@@ -74,13 +76,39 @@ def run_pipeline() -> None:
             logger.warning("No valid news entries after cleaning. Exiting pipeline.")
             return
         
+        # Step 3.5: Classify sentiment
+        logger.info("\n[3.5/6] Classifying sentiment for news articles...")
+        
+        # Prepare texts for classification (combine title and content)
+        texts_to_classify = [
+            f"{news.get('title', '')} {news.get('summary', '')}".strip()
+            for news in valid_news
+        ]
+        
+        # Classify in batch
+        sentiment_results = classify_batch(texts_to_classify)
+        
+        # Add sentiment results to news entries
+        for news, sentiment in zip(valid_news, sentiment_results):
+            news['sentiment'] = sentiment['sentiment']
+            news['confidence'] = sentiment['confidence']
+        
+        # Count results
+        successful_classifications = sum(1 for s in sentiment_results if s['confidence'] > 0.0)
+        failed_classifications = len(sentiment_results) - successful_classifications
+        
+        logger.info(f"Sentiment classification complete:")
+        logger.info(f"  - Total processed: {len(sentiment_results)}")
+        logger.info(f"  - Successful: {successful_classifications}")
+        logger.info(f"  - Failed: {failed_classifications}")
+        
         # Step 4: Save raw data
-        logger.info("\n[4/5] Saving raw data to JSON files...")
+        logger.info("\n[4/6] Saving raw data to JSON files...")
         raw_file = save_raw_news(valid_news)
         logger.info(f"Raw data saved to: {raw_file}")
         
         # Step 5: Insert into database
-        logger.info("\n[5/5] Inserting cleaned data into SQLite database...")
+        logger.info("\n[5/6] Inserting cleaned data into SQLite database...")
         db = NewsDatabase()
         
         # Get initial count
@@ -101,6 +129,7 @@ def run_pipeline() -> None:
         logger.info(f"  - Total fetched: {len(raw_news)}")
         logger.info(f"  - After deduplication: {len(deduplicated_news)}")
         logger.info(f"  - Valid entries: {len(valid_news)}")
+        logger.info(f"  - Sentiment classifications: {successful_classifications} successful, {failed_classifications} failed")
         logger.info(f"  - Successfully inserted: {inserted_count}")
         logger.info(f"  - Database total records: {final_count}")
         logger.info("=" * 60)

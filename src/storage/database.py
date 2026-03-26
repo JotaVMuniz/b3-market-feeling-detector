@@ -69,6 +69,19 @@ class NewsDatabase:
                     )
                 """)
                 
+                # Add sentiment and confidence columns if they don't exist
+                # Check for sentiment column
+                cursor.execute("PRAGMA table_info(news)")
+                columns = [row[1] for row in cursor.fetchall()]
+                
+                if 'sentiment' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN sentiment TEXT")
+                    logger.info("Added sentiment column to news table")
+                
+                if 'confidence' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN confidence REAL")
+                    logger.info("Added confidence column to news table")
+                
                 # Create index on source and published_at for better query performance
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_source 
@@ -118,15 +131,17 @@ class NewsDatabase:
                     try:
                         cursor.execute("""
                             INSERT INTO news 
-                            (title, content, source, published_at, url, collected_at)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                            (title, content, source, published_at, url, collected_at, sentiment, confidence)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             news.get("title", ""),
                             news.get("summary", ""),
                             news.get("source", ""),
                             news.get("published_at"),
                             news.get("link", ""),
-                            news.get("collected_at", "")
+                            news.get("collected_at", ""),
+                            news.get("sentiment"),
+                            news.get("confidence")
                         ))
                         inserted_count += 1
                     
