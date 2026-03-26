@@ -1,12 +1,13 @@
-# B3 Market Feeling Detector - Financial News Ingestion Pipeline
+# B3 Market Feeling Detector - Financial News Ingestion Pipeline with Sentiment Analysis
 
-A robust, production-ready Python pipeline for ingesting financial news from Brazilian RSS feeds. The pipeline collects, processes, and stores news articles in both raw JSON format and SQLite database.
+A robust, production-ready Python pipeline for ingesting financial news from Brazilian RSS feeds with AI-powered sentiment analysis. The pipeline collects, processes, stores news articles, and enriches them with sentiment classification using OpenAI's GPT models.
 
 ## Overview
 
 This project implements a complete data engineering solution for:
 - **Real-time ingestion** of financial news from 3 major Brazilian sources
 - **Data cleaning and normalization** with HTML tag stripping and text processing
+- **AI-powered sentiment analysis** using OpenAI GPT models for market sentiment detection
 - **Dual storage** with raw JSON files and SQLite database for different use cases
 - **Deduplication** to prevent storing identical articles
 - **Comprehensive logging** for monitoring and debugging
@@ -24,6 +25,9 @@ b3-market-feeling-detector/
 │   ├── processing/
 │   │   ├── __init__.py
 │   │   └── clean_news.py    # Data cleaning and normalization
+│   ├── nlp/
+│   │   ├── __init__.py
+│   │   └── sentiment.py     # AI-powered sentiment analysis
 │   └── storage/
 │       ├── __init__.py
 │       ├── save_raw.py      # Raw JSON file storage
@@ -33,7 +37,8 @@ b3-market-feeling-detector/
 │   ├── test_ingestion.py   # Tests for ingestion module
 │   ├── test_processing.py  # Tests for processing module
 │   ├── test_storage.py     # Tests for storage module
-│   └── test_database.py    # Tests for database module
+│   ├── test_database.py    # Tests for database module
+│   └── test_nlp.py         # Tests for sentiment analysis module
 ├── data/
 │   ├── raw/                # Raw JSON files (daily)
 │   └── processed/          # Processed data (optional)
@@ -59,6 +64,14 @@ b3-market-feeling-detector/
 - **Date standardization** to ISO 8601 format
 - **Entry validation** to ensure data quality
 
+### NLP Module (Sentiment Analysis)
+- **OpenAI GPT integration** for financial sentiment classification
+- **Portuguese language support** for Brazilian financial news
+- **Confidence scoring** (0-1) for sentiment reliability
+- **Cost optimization** with text truncation and caching
+- **Batch processing** for efficient API usage
+- **Error handling** with graceful fallback to neutral sentiment
+
 ### Storage Module
 
 **Raw Storage (JSON):**
@@ -70,7 +83,8 @@ b3-market-feeling-detector/
 - Table: `news` with auto-increment primary key
 - Unique constraint on URL to prevent duplicates
 - Indexed columns: `source`, `published_at`, `collected_at`
-- Supports quick lookups by source or date range
+- Sentiment and confidence scores for each article
+- Supports quick lookups by source, date range, or sentiment
 
 ### Database Schema
 
@@ -82,7 +96,9 @@ CREATE TABLE news (
     source TEXT NOT NULL,
     published_at TEXT,
     url TEXT NOT NULL UNIQUE,
-    collected_at TEXT NOT NULL
+    collected_at TEXT NOT NULL,
+    sentiment TEXT,           -- 'positivo', 'negativo', or 'neutro'
+    confidence REAL           -- Float between 0 and 1
 )
 ```
 
@@ -91,6 +107,7 @@ CREATE TABLE news (
 ### Prerequisites
 - Python 3.8 or higher
 - pip package manager
+- OpenAI API key (for sentiment analysis)
 
 ### Step 1: Clone or Create Project
 
@@ -116,6 +133,30 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Step 4: Configure OpenAI API Key
+
+Get your API key from [OpenAI Platform](https://platform.openai.com/account/api-keys).
+
+Set the environment variable:
+
+```bash
+# On Windows (PowerShell)
+$env:OPENAI_API_KEY = "your-api-key-here"
+
+# On Windows (Command Prompt)
+set OPENAI_API_KEY=your-api-key-here
+
+# On macOS/Linux
+export OPENAI_API_KEY="your-api-key-here"
+```
+
+For permanent configuration, add to your shell profile (`.bashrc`, `.zshrc`, etc.):
+
+```bash
+echo 'export OPENAI_API_KEY="your-api-key-here"' >> ~/.bashrc
+source ~/.bashrc
+```
+
 ## Usage
 
 ### Run the Complete Pipeline
@@ -128,9 +169,10 @@ This will:
 1. Fetch news from all configured RSS sources
 2. Deduplicate entries
 3. Clean and validate the data
-4. Save raw data to JSON file in `data/raw/`
-5. Insert cleaned data into SQLite database
-6. Log results to `pipeline.log`
+4. **Classify sentiment** using OpenAI GPT models
+5. Save raw data to JSON file in `data/raw/`
+6. Insert cleaned data with sentiment scores into SQLite database
+7. Log results to `pipeline.log`
 
 ### Example Output
 
@@ -139,23 +181,29 @@ This will:
 Starting news ingestion pipeline
 ============================================================
 
-[1/5] Fetching news from RSS sources...
+[1/6] Fetching news from RSS sources...
 Configured sources: 3
 INFO:ingestion.fetch_news:Fetching feed from InfoMoney: https://www.infomoney.com.br/feed/
 INFO:ingestion.fetch_news:Successfully fetched 50 entries from InfoMoney
 INFO:ingestion.fetch_news:Total news collected: 150
 
-[2/5] Deduplicating news articles...
+[2/6] Deduplicating news articles...
 Deduplicated 5 duplicate entries
 
-[3/5] Cleaning and processing news data...
+[3/6] Cleaning and processing news data...
 Cleaned 150 out of 150 news entries
 Valid news entries: 150
 
-[4/5] Saving raw data to JSON files...
+[4/6] Classifying sentiment for news articles...
+Sentiment classification complete:
+  - Total processed: 150
+  - Successful: 148
+  - Failed: 2
+
+[5/6] Saving raw data to JSON files...
 Saved 147 new news entries to data/raw/news_2024-03-26.json (total: 157)
 
-[5/5] Inserting cleaned data into SQLite database...
+[6/6] Inserting cleaned data into SQLite database...
 Database insert complete: 145 inserted, 5 skipped (duplicates)
 
 ============================================================
@@ -163,6 +211,7 @@ Pipeline execution summary:
   - Total fetched: 150
   - After deduplication: 150
   - Valid entries: 150
+  - Sentiment classifications: 148 successful, 2 failed
   - Successfully inserted: 145
   - Database total records: 457
 ============================================================
@@ -178,6 +227,8 @@ fetch_news.py (Fetch & Parse)
 deduplicate_news (URL-based dedup)
     ↓
 clean_news.py (Clean & Validate)
+    ↓
+sentiment.py (AI Sentiment Analysis)
     ↓
 ┌─────────────────────────────┐
 │                             │
@@ -210,6 +261,27 @@ Default: `data/news.db`
 To change, modify in `main.py`:
 ```python
 db = NewsDatabase(db_path="path/to/your/database.db")
+```
+
+### Sentiment Analysis Configuration
+
+The sentiment analysis uses the following defaults:
+- **Model**: `gpt-4o-mini` (cost-effective)
+- **Max text length**: 1000 characters
+- **Max retries**: 2 attempts
+- **Cache**: In-memory for duplicate text avoidance
+
+To modify settings, edit `nlp/sentiment.py`:
+
+```python
+# Change model
+MODEL_NAME = "gpt-4"  # More accurate but expensive
+
+# Change text limit
+MAX_TEXT_LENGTH = 2000  # Longer context
+
+# Change retry count
+MAX_RETRIES = 3  # More resilient
 ```
 
 ### Retry Configuration
@@ -288,26 +360,67 @@ SELECT title, source, published_at FROM news ORDER BY published_at DESC LIMIT 10
 -- News from last 24 hours
 SELECT * FROM news WHERE collected_at > datetime('now', '-1 day');
 
+-- Sentiment distribution
+SELECT sentiment, COUNT(*) as count FROM news GROUP BY sentiment;
+
+-- High confidence positive sentiment
+SELECT title, source, confidence FROM news 
+WHERE sentiment = 'positivo' AND confidence > 0.8 
+ORDER BY confidence DESC LIMIT 10;
+
+-- Sentiment by source
+SELECT source, sentiment, COUNT(*) as count 
+FROM news GROUP BY source, sentiment 
+ORDER BY source, sentiment;
+
+-- Average confidence by sentiment
+SELECT sentiment, AVG(confidence) as avg_confidence, COUNT(*) as count
+FROM news GROUP BY sentiment;
+
+-- Recent negative sentiment news
+SELECT title, source, published_at, confidence FROM news 
+WHERE sentiment = 'negativo' AND published_at > datetime('now', '-7 days')
+ORDER BY published_at DESC;
+
 -- Duplicate detection (should be none due to unique constraint)
 SELECT url, COUNT(*) FROM news GROUP BY url HAVING COUNT(*) > 1;
 ```
 
-## Performance Considerations
+## API Costs and Optimization
 
-### Database Optimization
-- Indexed columns for fast queries: `source`, `published_at`, `collected_at`
-- Unique constraint on URL prevents duplicate inserts
-- Use `db.get_news_by_source()` for filtered queries
+### OpenAI API Usage
 
-### Memory Efficiency
-- Processes data in-memory at scale (150+ articles)
-- Streaming JSON write/read for large datasets
-- Connection pooling via context managers
+The sentiment analysis uses OpenAI's `gpt-4o-mini` model, which is cost-effective for this use case:
 
-### Network Resilience
-- Automatic retry with exponential backoff
-- 3 second timeout per request (configurable)
-- Handles partial feed failures gracefully
+- **Cost per 1K tokens**: ~$0.00015 (input) + ~$0.0006 (output)
+- **Typical usage**: ~200-400 tokens per news article
+- **Estimated cost**: ~$0.0001-0.0002 per article
+
+For 150 articles/day: **~$0.02/day** or **~$7.50/month**
+
+### Cost Optimization Features
+
+- **Text truncation**: Limited to 1000 characters to reduce token usage
+- **In-memory caching**: Avoids re-processing identical text
+- **Batch processing**: Efficient API usage patterns
+- **Error handling**: Graceful fallback prevents wasted API calls
+
+### Monitoring API Usage
+
+Check your OpenAI usage dashboard at [platform.openai.com](https://platform.openai.com/usage) to monitor costs.
+
+### Reducing Costs
+
+```python
+# Skip sentiment analysis for existing articles
+# (Already implemented - only processes new articles)
+
+# Use cheaper model if accuracy allows
+MODEL_NAME = "gpt-3.5-turbo"  # ~80% cheaper than gpt-4o-mini
+
+# Reduce text length further
+MAX_TEXT_LENGTH = 500  # Shorter context
+```
 
 ## Troubleshooting
 
@@ -328,6 +441,31 @@ pip install -r requirements.txt
 - Check network connectivity
 - Verify RSS feed availability
 - Check disk space for JSON files
+
+### Issue: OpenAI API key not configured
+**Solution**: Set the `OPENAI_API_KEY` environment variable
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+```
+
+### Issue: Sentiment analysis failing with API errors
+**Solution**: 
+- Verify API key is valid and has credits
+- Check OpenAI service status
+- Review `pipeline.log` for specific error messages
+- The pipeline will continue with neutral sentiment as fallback
+
+### Issue: High API costs
+**Solution**:
+- Monitor usage at [platform.openai.com](https://platform.openai.com/usage)
+- Consider reducing `MAX_TEXT_LENGTH` in `sentiment.py`
+- Use caching is already enabled to avoid duplicate processing
+
+### Issue: All sentiment results are "neutro"
+**Solution**:
+- Check if API calls are succeeding in logs
+- Verify the prompt format in `sentiment.py`
+- Test manually: `python -c "from src.nlp.sentiment import classify_sentiment; print(classify_sentiment('test text'))"`
 
 ## Architecture Decisions
 
@@ -353,6 +491,28 @@ pip install -r requirements.txt
 
 This ensures data quality despite source redundancy.
 
+### Why OpenAI for Sentiment Analysis?
+
+1. **Portuguese Language Support**: GPT models handle Brazilian Portuguese financial terminology well
+2. **Context Understanding**: Can interpret financial impact and market sentiment nuances
+3. **Confidence Scoring**: Provides reliability metrics for sentiment classifications
+4. **Cost-Effective**: `gpt-4o-mini` balances accuracy and cost
+5. **Production Ready**: Reliable API with good error handling
+
+### Why In-Memory Caching?
+
+1. **Cost Reduction**: Avoids re-processing identical news text
+2. **Performance**: Faster pipeline execution for duplicate content
+3. **API Efficiency**: Reduces unnecessary API calls
+4. **Simple Implementation**: Dict-based cache works well for batch processing
+
+### Why Strict JSON Response Format?
+
+1. **Reliability**: Structured output ensures consistent parsing
+2. **Validation**: Easy to validate sentiment values and confidence ranges
+3. **Error Handling**: Clear fallback for malformed responses
+4. **Consistency**: Same format across all API calls
+
 ## Code Quality
 
 - **Type hints** throughout for better IDE support
@@ -360,10 +520,12 @@ This ensures data quality despite source redundancy.
 - **Modular design** for easy testing and extension
 - **Exception handling** at critical points
 - **Logging** for observability and debugging
+- **API error handling** with retry logic and fallbacks
+- **Cost optimization** with caching and text limits
 
 ## Testing
 
-### Pytest Suite (44 Unit Tests)
+### Pytest Suite (57 Unit Tests)
 
 The project includes comprehensive pytest coverage for all modules.
 
@@ -394,6 +556,9 @@ python -m pytest tests/test_storage.py -v
 
 # Test database module
 python -m pytest tests/test_database.py -v
+
+# Test sentiment analysis module
+python -m pytest tests/test_nlp.py -v
 ```
 
 #### Test Coverage
@@ -401,18 +566,20 @@ python -m pytest tests/test_database.py -v
 The test suite covers:
 - **Ingestion**: RSS source configuration, feed deduplication
 - **Processing**: HTML tag stripping, text normalization, date standardization, validation
+- **NLP**: Sentiment classification, API error handling, caching, batch processing
 - **Storage**: JSON file operations, deduplication
 - **Database**: CRUD operations, duplicate prevention, querying
 
-Current coverage: **44 tests, all passing**
+Current coverage: **57 tests, all passing**
 
 ```
 tests/test_database.py ............ 8 tests passed
 tests/test_ingestion.py ........... 13 tests passed
+tests/test_nlp.py ................ 13 tests passed
 tests/test_processing.py .......... 17 tests passed
 tests/test_storage.py ............ 6 tests passed
 
-Total: 44 passed
+Total: 57 passed
 ```
 
 #### Test Fixtures
@@ -436,11 +603,17 @@ python -c "from src.storage.database import NewsDatabase; db = NewsDatabase(); p
 
 # Test cleaning
 python -c "from src.processing.clean_news import clean_news_batch; news = [{'title': '<h1>Test</h1>', 'summary': 'Test', 'link': 'http://test.com', 'source': 'test', 'published_at': None, 'collected_at': '2024-03-26T00:00:00'}]; print(clean_news_batch(news))"
+
+# Test sentiment analysis (requires OPENAI_API_KEY)
+python -c "from src.nlp.sentiment import classify_sentiment; result = classify_sentiment('Petrobras announces record profits'); print(result)"
+
+# Test batch sentiment analysis
+python -c "from src.nlp.sentiment import classify_batch; texts = ['Good news', 'Bad news', 'Neutral update']; results = classify_batch(texts); print(results)"
 ```
 
 ## Future Enhancements
 
-- [ ] Sentiment analysis of article titles/content
+- [x] Sentiment analysis of article titles/content
 - [ ] Topic modeling with clustering
 - [ ] Time-series trend analysis
 - [ ] Docker containerization
@@ -448,6 +621,8 @@ python -c "from src.processing.clean_news import clean_news_batch; news = [{'tit
 - [ ] Data export to CSV/Parquet
 - [ ] Automated unit tests
 - [ ] Airflow/Prefect orchestration
+- [ ] Real-time sentiment dashboard
+- [ ] Multi-language support for international markets
 
 ## License
 
