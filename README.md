@@ -159,63 +159,133 @@ source ~/.bashrc
 
 ## Usage
 
-### Run the Complete Pipeline
+### Run the Dashboard
 
 ```bash
-python main.py
+streamlit run dashboard.py
 ```
 
-This will:
-1. Fetch news from all configured RSS sources
-2. Deduplicate entries
-3. Clean and validate the data
-4. **Classify sentiment** using OpenAI GPT models
-5. Save raw data to JSON file in `data/raw/`
-6. Insert cleaned data with sentiment scores into SQLite database
-7. Log results to `pipeline.log`
+Or using Python module:
 
-### Example Output
+```bash
+python -m streamlit run dashboard.py
+```
+
+This will start a web server at `http://localhost:8501` with an interactive dashboard featuring:
+
+- **Real-time metrics** of news volume and sentiment distribution
+- **Interactive charts** showing sentiment trends and confidence scores
+- **Advanced filtering** by source, sentiment, and date range
+- **Detailed news view** with expandable content
+- **Source analysis** comparing sentiment across different news sources
+
+## Dashboard Interativo
+
+O projeto inclui um dashboard Streamlit completo para visualização e análise dos dados de notícias.
+
+### Funcionalidades do Dashboard
+
+#### 📊 **Métricas em Tempo Real**
+- Contagem total de notícias
+- Distribuição de sentimentos (positivo, negativo, neutro)
+- Pontuação média de confiança
+- Percentuais e tendências
+
+#### 📈 **Visualizações Interativas**
+- **Gráfico de Pizza**: Distribuição de sentimentos
+- **Histograma de Confiança**: Distribuição das pontuações de confiança
+- **Série Temporal**: Evolução dos sentimentos ao longo do tempo
+- **Mapa de Calor**: Comparação fonte vs sentimento
+
+#### 🔍 **Sistema de Filtros Avançado**
+- **Por Fonte**: Filtrar notícias de fontes específicas
+- **Por Sentimento**: Mostrar apenas notícias positivas, negativas ou neutras
+- **Por Data**: Intervalo de datas para análise histórica
+- **Limite de Resultados**: Controlar volume de dados exibidos
+
+#### 📰 **Visualização Detalhada**
+- Lista expansível de notícias
+- Visualização completa do conteúdo
+- Links diretos para as fontes originais
+- Metadados (fonte, data, sentimento, confiança)
+
+### Exemplo de Uso
+
+```bash
+# Executar o dashboard
+streamlit run dashboard.py
+
+# Acessar em: http://localhost:8501
+```
+
+### Interface do Dashboard
 
 ```
-============================================================
-Starting news ingestion pipeline
-============================================================
-
-[1/6] Fetching news from RSS sources...
-Configured sources: 3
-INFO:ingestion.fetch_news:Fetching feed from InfoMoney: https://www.infomoney.com.br/feed/
-INFO:ingestion.fetch_news:Successfully fetched 50 entries from InfoMoney
-INFO:ingestion.fetch_news:Total news collected: 150
-
-[2/6] Deduplicating news articles...
-Deduplicated 5 duplicate entries
-
-[3/6] Cleaning and processing news data...
-Cleaned 150 out of 150 news entries
-Valid news entries: 150
-
-[4/6] Classifying sentiment for news articles...
-Sentiment classification complete:
-  - Total processed: 150
-  - Successful: 148
-  - Failed: 2
-
-[5/6] Saving raw data to JSON files...
-Saved 147 new news entries to data/raw/news_2024-03-26.json (total: 157)
-
-[6/6] Inserting cleaned data into SQLite database...
-Database insert complete: 145 inserted, 5 skipped (duplicates)
-
-============================================================
-Pipeline execution summary:
-  - Total fetched: 150
-  - After deduplication: 150
-  - Valid entries: 150
-  - Sentiment classifications: 148 successful, 2 failed
-  - Successfully inserted: 145
-  - Database total records: 457
-============================================================
+┌─────────────────────────────────────────────────────────────┐
+│ 📈 B3 Market Feeling Detector                              │
+│ Dashboard de Análise de Sentimento de Notícias Financeiras │
+├─────────────────────────────────────────────────────────────┤
+│ 🔍 Filtros          │ 📊 Métricas                           │
+│                     │                                       │
+│ Fonte: [Todas ▼]    │ Total: 1,247    Positivo: 423 (34%) │
+│ Sentimento: [Todos] │ Negativo: 298    Neutro: 526 (42%)  │
+│ Data Inicial: [...] │ Confiança: 0.78                      │
+│ Data Final: [...]   │                                       │
+├─────────────────────┼───────────────────────────────────────┤
+│ 📊 Visualizações    │ 📰 Notícias                           │
+│                     │                                       │
+│ [Gráfico Pizza]     │ ▶️ Notícia 1 - Fonte A (positivo)    │
+│ [Histograma]        │ ▶️ Notícia 2 - Fonte B (negativo)    │
+│ [Linha Temporal]    │ ▶️ Notícia 3 - Fonte C (neutro)      │
+│ [Mapa Calor]        │                                       │
+└─────────────────────┴───────────────────────────────────────┘
 ```
+
+### Pré-requisitos para o Dashboard
+
+Certifique-se de que todas as dependências estão instaladas:
+
+```bash
+pip install -r requirements.txt
+```
+
+### Executando o Dashboard
+
+```bash
+# Navegar para o diretório do projeto
+cd b3-market-feeling-detector
+
+# Executar o dashboard
+python -m streamlit run dashboard.py
+
+# Ou diretamente
+streamlit run dashboard.py
+```
+
+O dashboard estará disponível em: **http://localhost:8501**
+
+### Funcionalidades Principais
+
+- **📊 Métricas em Tempo Real**: Contadores dinâmicos de notícias e estatísticas de sentimento
+- **📈 Visualizações Interativas**: Gráficos de pizza, histogramas, séries temporais e mapas de calor
+- **🔍 Filtros Avançados**: Filtragem por fonte, sentimento, data e limite de resultados
+- **📰 Visualização Detalhada**: Lista expansível com conteúdo completo das notícias
+- **🔗 Links Diretos**: Acesso direto às fontes originais das notícias
+
+### Tratamento de Dados
+
+O dashboard é inteligente e se adapta ao estado dos dados:
+- **Com dados de sentimento**: Exibe todas as visualizações e métricas completas
+- **Sem dados de sentimento**: Mostra métricas básicas e visualização de notícias apenas
+- **Banco vazio**: Exibe mensagem informativa sobre ausência de dados
+
+### Personalização
+
+O dashboard pode ser facilmente estendido com:
+- Novos tipos de gráficos (barras, dispersão, etc.)
+- Métricas personalizadas
+- Filtros adicionais
+- Temas customizados do Streamlit
 
 ## Data Flow
 
@@ -610,19 +680,6 @@ python -c "from src.nlp.sentiment import classify_sentiment; result = classify_s
 # Test batch sentiment analysis
 python -c "from src.nlp.sentiment import classify_batch; texts = ['Good news', 'Bad news', 'Neutral update']; results = classify_batch(texts); print(results)"
 ```
-
-## Future Enhancements
-
-- [x] Sentiment analysis of article titles/content
-- [ ] Topic modeling with clustering
-- [ ] Time-series trend analysis
-- [ ] Docker containerization
-- [ ] REST API for query interface
-- [ ] Data export to CSV/Parquet
-- [ ] Automated unit tests
-- [ ] Airflow/Prefect orchestration
-- [ ] Real-time sentiment dashboard
-- [ ] Multi-language support for international markets
 
 ## License
 
