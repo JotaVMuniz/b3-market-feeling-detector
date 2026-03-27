@@ -6,8 +6,13 @@ import json
 import logging
 import os
 from typing import Dict, List, Optional
+
+from dotenv import load_dotenv
 import openai
 from openai import OpenAI
+
+# Carrega variáveis do arquivo .env automaticamente
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +177,14 @@ def classify_sentiment(text: str) -> Dict:
     if not hasattr(classify_sentiment, '_classifier'):
         classify_sentiment._classifier = SentimentClassifier()
 
-    result = classify_sentiment._classifier._classify_single(text)
+    try:
+        result = classify_sentiment._classifier._classify_single(text)
+    except Exception as e:
+        logger.error("Sentiment classification failed, applying fallback neutral sentiment", exc_info=True)
+        result = {
+            "sentiment": "neutro",
+            "confidence": 0.0
+        }
 
     # Cache the result
     _sentiment_cache[cache_key] = result
@@ -192,7 +204,11 @@ def classify_batch(texts: List[str]) -> List[Dict]:
     """
     results = []
     for text in texts:
-        result = classify_sentiment(text)
+        try:
+            result = classify_sentiment(text)
+        except Exception as e:
+            logger.error("Batch sentiment classification failed for one text, applying fallback neutral sentiment", exc_info=True)
+            result = {"sentiment": "neutro", "confidence": 0.0}
         results.append(result)
     return results
 
