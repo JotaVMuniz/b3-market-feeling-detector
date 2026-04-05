@@ -3,6 +3,7 @@ Database module for storing news in SQLite.
 """
 
 import sqlite3
+import json
 import logging
 from typing import List, Dict, Optional
 from pathlib import Path
@@ -82,6 +83,18 @@ class NewsDatabase:
                     cursor.execute("ALTER TABLE news ADD COLUMN confidence REAL")
                     logger.info("Added confidence column to news table")
                 
+                if 'segments' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN segments TEXT")
+                    logger.info("Added segments column to news table")
+                
+                if 'tickers' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN tickers TEXT")
+                    logger.info("Added tickers column to news table")
+                
+                if 'is_relevant' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN is_relevant INTEGER")
+                    logger.info("Added is_relevant column to news table")
+                
                 # Create index on source and published_at for better query performance
                 cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_source 
@@ -131,8 +144,8 @@ class NewsDatabase:
                     try:
                         cursor.execute("""
                             INSERT INTO news 
-                            (title, content, source, published_at, url, collected_at, sentiment, confidence)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            (title, content, source, published_at, url, collected_at, is_relevant, sentiment, confidence, segments, tickers)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             news.get("title", ""),
                             news.get("summary", ""),
@@ -140,8 +153,11 @@ class NewsDatabase:
                             news.get("published_at"),
                             news.get("link", ""),
                             news.get("collected_at", ""),
+                            1 if news.get("is_relevant", False) else 0,
                             news.get("sentiment"),
-                            news.get("confidence")
+                            news.get("confidence"),
+                            json.dumps(news.get("segments", [])),
+                            json.dumps(news.get("tickers", []))
                         ))
                         inserted_count += 1
                     
@@ -234,3 +250,68 @@ class NewsDatabase:
         except Exception as e:
             logger.error(f"Error querying latest news: {str(e)}")
             return []
+
+    def get_all_news(self) -> List[Dict]:
+        """
+        Get all news entries from the database.
+
+        Returns:
+            List of all news records.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM news")
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error querying all news: {str(e)}")
+            return []
+
+    def update_news_batch(self, news_list: List[Dict]) -> int:
+        """
+        Update enrichment fields for an existing batch of news records.
+
+        Args:
+            news_list: List of news dictionaries including url and enrichment fields.
+
+        Returns:
+            Number of records updated.
+        """
+        if not news_list:
+            logger.warning("No news to update")
+            return 0
+
+        updated_count = 0
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for news in news_list:
+                    try:
+                        cursor.execute("""
+                            UPDATE news SET
+                                is_relevant = ?,
+                                sentiment = ?,
+                                confidence = ?,
+                                segments = ?,
+                                tickers = ?
+                            WHERE url = ?
+                        """, (
+                            1 if news.get("is_relevant", False) else 0,
+                            news.get("sentiment"),
+                            news.get("confidence"),
+                            json.dumps(news.get("segments", [])),
+                            json.dumps(news.get("tickers", [])),
+                            news.get("url", "")
+                        ))
+                        if cursor.rowcount:
+                            updated_count += 1
+                    except Exception as e:
+                        logger.error(f"Error updating news: {str(e)}")
+                        continue
+
+            logger.info(f"Database update complete: {updated_count} records updated")
+            return updated_count
+        except Exception as e:
+            logger.error(f"Error updating news batch: {str(e)}")
+            return 0

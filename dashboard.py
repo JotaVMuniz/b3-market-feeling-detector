@@ -10,8 +10,10 @@ from datetime import datetime, timedelta
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional
+from dotenv import load_dotenv
 import os
 
+load_dotenv()
 
 # Database connection
 def get_db_connection(db_path: str = "data/news.db"):
@@ -35,9 +37,11 @@ def load_news_data(
     columns = [row[1] for row in cursor.fetchall()]
     has_sentiment = 'sentiment' in columns
     has_confidence = 'confidence' in columns
+    has_segments = 'segments' in columns
+    has_tickers = 'tickers' in columns
     conn.close()
 
-    if has_sentiment and has_confidence:
+    if has_sentiment and has_confidence and has_segments and has_tickers:
         query = """
         SELECT
             id,
@@ -48,7 +52,26 @@ def load_news_data(
             url,
             collected_at,
             sentiment,
-            confidence
+            confidence,
+            segments,
+            tickers
+        FROM news
+        WHERE 1=1
+        """
+    elif has_sentiment and has_confidence:
+        query = """
+        SELECT
+            id,
+            title,
+            content,
+            source,
+            published_at,
+            url,
+            collected_at,
+            sentiment,
+            confidence,
+            '[]' as segments,
+            '[]' as tickers
         FROM news
         WHERE 1=1
         """
@@ -63,7 +86,9 @@ def load_news_data(
             url,
             collected_at,
             'neutro' as sentiment,
-            0.0 as confidence
+            0.0 as confidence,
+            '[]' as segments,
+            '[]' as tickers
         FROM news
         WHERE 1=1
         """
@@ -97,6 +122,13 @@ def load_news_data(
         # Convert dates
         df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
         df['collected_at'] = pd.to_datetime(df['collected_at'], errors='coerce')
+        
+        # Parse JSON fields
+        import json
+        if 'segments' in df.columns:
+            df['segments'] = df['segments'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
+        if 'tickers' in df.columns:
+            df['tickers'] = df['tickers'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
 
         return df
     except Exception as e:
@@ -446,6 +478,10 @@ def main():
                     st.markdown(f"**Fonte:** {row['source']}")
                     st.markdown(f"**Sentimento:** {row['sentiment']}")
                     st.markdown(f"**Confiança:** {row['confidence']:.3f}")
+                    if 'segments' in row and row['segments']:
+                        st.markdown(f"**Segmentos:** {', '.join(row['segments'])}")
+                    if 'tickers' in row and row['tickers']:
+                        st.markdown(f"**Tickers:** {', '.join(row['tickers'])}")
                     st.markdown(f"**Publicado:** {row['published_at']}")
                     st.markdown(f"**Coletado:** {row['collected_at']}")
 
