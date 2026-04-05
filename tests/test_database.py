@@ -82,3 +82,38 @@ class TestNewsDatabase:
         result = db.get_news_by_source("NonExistentSource")
         
         assert len(result) == 0
+
+    def test_get_all_news_and_update_news_batch(self, db, sample_news):
+        """Test retrieving all news and updating enrichment fields."""
+        # Insert news with enrichment fields
+        enriched_news = []
+        for news in sample_news:
+            enriched_news.append({
+                **news,
+                "is_relevant": True,
+                "segments": ["bancos"],
+                "tickers": ["ITUB4"]
+            })
+
+        db.insert_news(enriched_news)
+
+        all_news = db.get_all_news()
+        assert len(all_news) == len(sample_news)
+
+        updated = db.update_news_batch([
+            {
+                "url": sample_news[0]["link"],
+                "is_relevant": False,
+                "sentiment": "neutro",
+                "confidence": 0.0,
+                "segments": [],
+                "tickers": []
+            }
+        ])
+
+        assert updated == 1
+
+        result = db.get_news_by_source("TestSource")
+        assert result[0]["is_relevant"] == 0
+        assert result[0]["sentiment"] == "neutro"
+        assert result[0]["confidence"] == 0.0
