@@ -2,6 +2,7 @@
 Streamlit Dashboard for Financial News Sentiment Analysis
 """
 
+import json
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -452,6 +453,17 @@ def main():
     if not os.getenv("OPENAI_API_KEY"):
         st.warning("⚠️ A variável de ambiente OPENAI_API_KEY não está configurada. Configure o arquivo .env e reinicie o dashboard para habilitar análise de sentimento.")
 
+    tab_news, tab_market = st.tabs(["📰 Notícias & Sentimento", "📊 Dados de Mercado"])
+
+    with tab_news:
+        _render_news_tab()
+
+    with tab_market:
+        _render_market_tab()
+
+
+def _render_news_tab():
+    """Render the news sentiment tab content."""
     # Sidebar filters
     st.sidebar.header("🔍 Filtros")
 
@@ -464,7 +476,7 @@ def main():
         sources = pd.read_sql_query("SELECT DISTINCT source FROM news ORDER BY source", conn)['source'].tolist()
         conn.close()
         sources.insert(0, "Todas")
-    except:
+    except Exception:
         sources = ["Todas"]
 
     source_filter = st.sidebar.selectbox("Fonte", sources)
@@ -670,11 +682,6 @@ def main():
             else:
                 return 'background-color: #fff3cd; color: #856404'
 
-        styled_df = display_df.style.apply(
-            lambda x: [color_sentiment(val) if col == 'sentiment' else '' for col, val in x.items()],
-            axis=1
-        )
-
         # Display table with expandable content
         for idx, row in display_df.iterrows():
             with st.expander(f"📰 {row['title']} - {row['source']} ({row['sentiment']})"):
@@ -701,6 +708,292 @@ def main():
     st.markdown("- Use os filtros na barra lateral para explorar os dados")
     st.markdown("- Clique nas notícias para ver o conteúdo completo")
     st.markdown("- Os gráficos mostram tendências e distribuições dos sentimentos")
+
+
+# ---------------------------------------------------------------------------
+# Market data tab helpers
+# ---------------------------------------------------------------------------
+
+def _load_correlations(db_path: str = "data/news.db", limit: int = 500) -> pd.DataFrame:
+    """Load news–price correlation records joined with news metadata."""
+    query = """
+        SELECT
+            c.news_id,
+            c.ticker,
+            c.news_date,
+            c.sentiment,
+            c.confidence,
+            c.d0_var,
+            c.d1_var,
+            c.d5_var,
+            n.title,
+            n.source
+        FROM news_price_correlation c
+        JOIN news n ON n.id = c.news_id
+        ORDER BY c.news_date DESC
+        LIMIT ?
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql_query(query, conn, params=(limit,))
+        conn.close()
+        df['news_date'] = pd.to_datetime(df['news_date'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar correlações: {e}")
+        return pd.DataFrame()
+
+
+def _load_asset_prices(ticker: str, db_path: str = "data/news.db") -> pd.DataFrame:
+    """Load stored daily prices for a single ticker."""
+    query = """
+        SELECT date, open, close, high, low, avg_price, volume
+        FROM asset_prices
+        WHERE ticker = ?
+        ORDER BY date ASC
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql_query(query, conn, params=(ticker,))
+        conn.close()
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar preços para {ticker}: {e}")
+        return pd.DataFrame()
+
+
+def _load_tickers_in_db(db_path: str = "data/news.db") -> List[str]:
+    """Return tickers that have price data in asset_prices."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='asset_prices'")
+        if not cursor.fetchone():
+            conn.close()
+            return []
+        df = pd.read_sql_query(
+            "SELECT DISTINCT ticker FROM asset_prices ORDER BY ticker", conn
+        )
+        conn.close()
+        return df['ticker'].tolist()
+    except Exception as e:
+        st.error(f"Erro ao carregar lista de ativos: {e}")
+        return []
+
+
+def _create_price_with_news_chart(price_df: pd.DataFrame, news_df: pd.DataFrame, ticker: str):
+    """Line chart of closing price annotated with news sentiment events."""
+    if price_df.empty:
+        return None
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=price_df['date'],
+        y=price_df['close'],
+        mode='lines',
+        name='Fechamento',
+        line=dict(color='#1f77b4', width=2),
+    ))
+
+    if not news_df.empty:
+        ticker_news = news_df[news_df['ticker'] == ticker].copy()
+
+        # Build a date → close lookup for annotating events on the price line
+        price_lookup = (
+            price_df.set_index(price_df['date'].dt.normalize())['close'].to_dict()
+        )
+
+        for sentiment, color, symbol in [
+            ('positivo', '#2ca02c', 'triangle-up'),
+            ('negativo', '#d62728', 'triangle-down'),
+            ('neutro', '#ff7f0e', 'circle'),
+        ]:
+            subset = ticker_news[ticker_news['sentiment'] == sentiment].copy()
+            if subset.empty:
+                continue
+
+            subset['_date_key'] = subset['news_date'].dt.normalize()
+            subset['_y'] = subset['_date_key'].map(price_lookup)
+
+            # Keep only rows where a matching price exists
+            subset = subset.dropna(subset=['_y'])
+            if subset.empty:
+                continue
+
+            fig.add_trace(go.Scatter(
+                x=subset['news_date'],
+                y=subset['_y'],
+                mode='markers',
+                name=f'Notícia {sentiment}',
+                marker=dict(color=color, size=10, symbol=symbol),
+                text=subset['title'],
+                hovertemplate='%{text}<extra></extra>',
+            ))
+
+    fig.update_layout(
+        title=f"Preço de Fechamento — {ticker}",
+        xaxis_title="Data",
+        yaxis_title="Preço (R$)",
+        legend_title="Legenda",
+    )
+    return fig
+
+
+def _create_sentiment_vs_return_scatter(corr_df: pd.DataFrame, horizon: str = "d1_var"):
+    """Scatter plot: sentiment vs price return for a given horizon."""
+    if corr_df.empty or horizon not in corr_df.columns:
+        return None
+
+    label_map = {"d0_var": "D0 (intraday)", "d1_var": "D+1", "d5_var": "D+5"}
+    label = label_map.get(horizon, horizon)
+
+    plot_df = corr_df[corr_df[horizon].notna()].copy()
+    if plot_df.empty:
+        return None
+
+    plot_df[horizon] = plot_df[horizon] * 100  # convert to percentage
+
+    fig = px.strip(
+        plot_df,
+        x='sentiment',
+        y=horizon,
+        color='sentiment',
+        hover_data=['ticker', 'title', 'news_date'],
+        color_discrete_map={
+            'positivo': '#2ca02c',
+            'negativo': '#d62728',
+            'neutro': '#ff7f0e',
+        },
+        title=f"Sentimento vs Retorno {label} (%)",
+        labels={'sentiment': 'Sentimento', horizon: f'Retorno {label} (%)'},
+    )
+    fig.add_hline(y=0, line_dash='dash', line_color='gray')
+    return fig
+
+
+def _create_correlation_heatmap(corr_df: pd.DataFrame):
+    """Heatmap of average returns grouped by ticker and sentiment."""
+    if corr_df.empty:
+        return None
+
+    needed = ['ticker', 'sentiment', 'd1_var']
+    if not all(c in corr_df.columns for c in needed):
+        return None
+
+    pivot = (
+        corr_df[needed]
+        .dropna()
+        .groupby(['ticker', 'sentiment'])['d1_var']
+        .mean()
+        .unstack(fill_value=0)
+        * 100
+    )
+
+    if pivot.empty:
+        return None
+
+    fig = px.imshow(
+        pivot,
+        title="Retorno Médio D+1 (%) por Ticker e Sentimento",
+        color_continuous_scale="RdYlGn",
+        aspect="auto",
+        labels={"color": "Retorno Médio D+1 (%)"},
+    )
+    fig.update_layout(xaxis_title="Sentimento", yaxis_title="Ticker")
+    return fig
+
+
+def _render_market_tab():
+    """Render the Market Data tab."""
+    st.header("📊 Dados de Mercado — Correlação Notícias × Preços B3")
+
+    db_path = "data/news.db"
+
+    # Check that the table exists
+    tickers_available = _load_tickers_in_db(db_path)
+
+    if not tickers_available:
+        st.info(
+            "🔄 Nenhum dado de mercado encontrado ainda.  "
+            "Execute o pipeline (`python main.py`) para buscar cotações e calcular correlações."
+        )
+        return
+
+    corr_df = _load_correlations(db_path)
+
+    # ------------------------------------------------------------------ #
+    # Summary metrics
+    # ------------------------------------------------------------------ #
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Ativos com preço", len(tickers_available))
+    with col2:
+        st.metric("Pares notícia–ativo", len(corr_df))
+    with col3:
+        if not corr_df.empty and 'd1_var' in corr_df.columns:
+            avg_d1 = corr_df['d1_var'].dropna().mean() * 100
+            st.metric("Retorno médio D+1", f"{avg_d1:.2f}%")
+        else:
+            st.metric("Retorno médio D+1", "N/A")
+
+    st.divider()
+
+    # ------------------------------------------------------------------ #
+    # Scatter: sentiment vs return
+    # ------------------------------------------------------------------ #
+    st.subheader("Sentimento vs Retorno de Preço")
+    horizon = st.selectbox(
+        "Horizonte de retorno",
+        options=["d1_var", "d0_var", "d5_var"],
+        format_func=lambda x: {"d0_var": "D0 (intraday)", "d1_var": "D+1", "d5_var": "D+5"}[x],
+        key="horizon_select",
+    )
+    scatter = _create_sentiment_vs_return_scatter(corr_df, horizon)
+    if scatter:
+        st.plotly_chart(scatter, use_container_width=True)
+    else:
+        st.info("Dados insuficientes para o gráfico de dispersão.")
+
+    # ------------------------------------------------------------------ #
+    # Heatmap: ticker × sentiment
+    # ------------------------------------------------------------------ #
+    st.subheader("Mapa de Calor — Retorno Médio D+1 por Ticker e Sentimento")
+    heatmap = _create_correlation_heatmap(corr_df)
+    if heatmap:
+        st.plotly_chart(heatmap, use_container_width=True)
+    else:
+        st.info("Dados insuficientes para o mapa de calor.")
+
+    # ------------------------------------------------------------------ #
+    # Price chart with news events
+    # ------------------------------------------------------------------ #
+    st.subheader("Preço do Ativo com Eventos de Notícias")
+    selected_ticker = st.selectbox("Selecione o ativo", options=tickers_available, key="ticker_select")
+
+    if selected_ticker:
+        price_df = _load_asset_prices(selected_ticker, db_path)
+        price_chart = _create_price_with_news_chart(price_df, corr_df, selected_ticker)
+        if price_chart:
+            st.plotly_chart(price_chart, use_container_width=True)
+        else:
+            st.info(f"Sem dados de preço para {selected_ticker}.")
+
+    # ------------------------------------------------------------------ #
+    # Correlation table
+    # ------------------------------------------------------------------ #
+    st.subheader("Tabela de Correlações")
+    if corr_df.empty:
+        st.info("Nenhuma correlação calculada ainda.")
+    else:
+        display_corr = corr_df.copy()
+        for col in ['d0_var', 'd1_var', 'd5_var']:
+            if col in display_corr.columns:
+                display_corr[col] = (display_corr[col] * 100).round(2).astype(str) + '%'
+        if 'news_date' in display_corr.columns:
+            display_corr['news_date'] = display_corr['news_date'].dt.strftime('%Y-%m-%d')
+        st.dataframe(display_corr, use_container_width=True)
 
 
 if __name__ == "__main__":

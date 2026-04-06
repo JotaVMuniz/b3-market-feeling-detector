@@ -251,6 +251,42 @@ class NewsDatabase:
             logger.error(f"Error querying latest news: {str(e)}")
             return []
 
+    def get_news_without_enrichment(self) -> List[Dict]:
+        """
+        Get news entries that have not yet been enriched (sentiment IS NULL).
+
+        Returns:
+            List of news records without enrichment data.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM news WHERE sentiment IS NULL")
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error querying unenriched news: {str(e)}")
+            return []
+
+    def get_enriched_news(self) -> List[Dict]:
+        """
+        Get news entries that have been enriched with sentiment data.
+
+        Returns:
+            List of news records that have a non-null sentiment value.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM news WHERE sentiment IS NOT NULL"
+                )
+                rows = cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Error querying enriched news: {str(e)}")
+            return []
+
     def get_all_news(self) -> List[Dict]:
         """
         Get all news entries from the database.
