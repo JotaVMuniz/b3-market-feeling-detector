@@ -3,6 +3,7 @@ Main orchestration module for the financial news ingestion pipeline.
 """
 
 import argparse
+import datetime
 import logging
 import sys
 from pathlib import Path
@@ -26,9 +27,13 @@ from src.processing.clean_news import clean_news_batch, validate_news_entry
 from src.storage.save_raw import save_raw_news
 from src.storage.database import NewsDatabase
 from src.nlp.enrichment import enrich_batch, is_probably_financial
+from src.market_data.database_market import MarketDatabase
+from src.market_data.fetch_prices import fetch_prices_for_tickers
+from src.market_data.fetch_companies import extract_companies_from_prices
+from src.market_data.correlation import compute_correlations
 
 
-def run_pipeline(reprocess_existing: bool = False) -> None:
+def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
     Execute the complete news ingestion pipeline.
 
@@ -40,6 +45,8 @@ def run_pipeline(reprocess_existing: bool = False) -> None:
     5. Save raw data to JSON files
     6. Insert cleaned data into SQLite database
     7. Optionally reprocess all existing news in the database
+    8. Fetch B3 market prices for tickers mentioned in today's news
+    9. Compute and store news–price correlation metrics
     """
     logger.info("=" * 60)
     logger.info("Starting news ingestion pipeline")
@@ -159,6 +166,10 @@ def run_pipeline(reprocess_existing: bool = False) -> None:
         if reprocess_existing:
             logger.info(f"Reprocessed existing records: {reprocessed_count}")
         
+        # Step 8–9: Market data enrichment
+        if fetch_market_data:
+            _run_market_data_step(db, valid_news)
+
         # Pipeline summary
         logger.info("\n" + "=" * 60)
         logger.info("Pipeline execution summary:")
@@ -176,6 +187,90 @@ def run_pipeline(reprocess_existing: bool = False) -> None:
         sys.exit(1)
 
 
+def _run_market_data_step(db: NewsDatabase, recent_news: list) -> None:
+    """
+    Fetch B3 prices for tickers found in *recent_news*, update the
+    companies table, and compute news–price correlations.
+
+    This step is best-effort: failures are logged but do not abort the
+    pipeline.
+
+    Args:
+        db: NewsDatabase instance pointing at the shared SQLite file.
+        recent_news: News records just inserted/processed in this run.
+    """
+    import json as _json
+
+    logger.info("\n[8/9] Fetching B3 market prices for news tickers...")
+
+    try:
+        market_db = MarketDatabase(db_path=db.db_path)
+
+        # Collect unique tickers and dates from recent news
+        tickers_seen: set = set()
+        dates_seen: set = set()
+        for news in recent_news:
+            raw = news.get("tickers")
+            if isinstance(raw, list):
+                for t in raw:
+                    tickers_seen.add(t)
+            elif isinstance(raw, str):
+                try:
+                    for t in _json.loads(raw):
+                        tickers_seen.add(t)
+                except Exception:
+                    pass
+
+            raw_date = news.get("published_at", "")
+            if raw_date:
+                try:
+                    dates_seen.add(datetime.date.fromisoformat(raw_date[:10]))
+                except ValueError:
+                    pass
+
+        if not tickers_seen or not dates_seen:
+            logger.info("No tickers or dates found in recent news — skipping market data step")
+            return
+
+        # Also include D+1 to D+5 offset dates so correlations can be calculated
+        extended_dates = set(dates_seen)
+        for base in list(dates_seen):
+            for offset in range(1, 8):
+                extended_dates.add(base + datetime.timedelta(days=offset))
+
+        price_records = fetch_prices_for_tickers(
+            tickers=list(tickers_seen),
+            dates=sorted(extended_dates),
+        )
+
+        if price_records:
+            prices_written = market_db.upsert_prices(price_records)
+            logger.info(f"Stored {prices_written} price records in asset_prices")
+
+            # Update company metadata from price data
+            companies = extract_companies_from_prices(price_records)
+            companies_written = market_db.upsert_companies(companies)
+            logger.info(f"Stored {companies_written} company records in companies")
+        else:
+            logger.warning("No price data returned for the news tickers/dates")
+
+        # Step 9: Compute correlations for news that has tickers + sentiment
+        logger.info("\n[9/9] Computing news–price correlations...")
+        relevant_news = [
+            n for n in recent_news
+            if n.get("sentiment") and n.get("tickers")
+        ]
+        correlation_records = compute_correlations(relevant_news, market_db)
+        if correlation_records:
+            corr_written = market_db.upsert_correlations(correlation_records)
+            logger.info(f"Stored {corr_written} correlation records in news_price_correlation")
+        else:
+            logger.info("No correlation records computed (insufficient price data or no relevant news)")
+
+    except Exception as exc:
+        logger.error(f"Market data step failed: {exc}", exc_info=True)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the financial news ingestion pipeline.")
     parser.add_argument(
@@ -183,6 +278,14 @@ if __name__ == "__main__":
         action='store_true',
         help='Reprocess the entire news database after inserting new articles.'
     )
+    parser.add_argument(
+        '--no-market-data',
+        action='store_true',
+        help='Skip the B3 market data fetching and correlation step.'
+    )
     args = parser.parse_args()
 
-    run_pipeline(reprocess_existing=args.reprocess_existing)
+    run_pipeline(
+        reprocess_existing=args.reprocess_existing,
+        fetch_market_data=not args.no_market_data,
+    )
