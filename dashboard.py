@@ -1,999 +1,765 @@
 """
-Streamlit Dashboard for Financial News Sentiment Analysis
+Streamlit Dashboard — B3 Market Feeling Detector
+
+Three-tab layout:
+  📊 Visão Geral  – Aggregated metrics and sentiment by market segment.
+  📈 Por Ativo    – Asset-centric view: price history + related news.
+  📰 Notícias     – Full news feed with sentiment filters.
 """
 
 import json
-import streamlit as st
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional
+
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-import json
-import sqlite3
-from pathlib import Path
-from typing import List, Dict, Optional
+import streamlit as st
 from dotenv import load_dotenv
 import os
 
 load_dotenv()
 
-# Database connection
-def get_db_connection(db_path: str = "data/news.db"):
-    """Get database connection."""
+DB_PATH = os.getenv("DB_PATH", "data/news.db")
+
+SENTIMENT_COLORS = {
+    "positivo": "#2ca02c",
+    "negativo": "#d62728",
+    "neutro":   "#ff7f0e",
+}
+
+# ---------------------------------------------------------------------------
+# Database helpers
+# ---------------------------------------------------------------------------
+
+def _conn(db_path: str = DB_PATH):
     return sqlite3.connect(db_path)
 
 
-def expand_segments(df: pd.DataFrame) -> pd.DataFrame:
-    """Expand rows with multiple segments into one row per segment."""
-    if df.empty or 'segments' not in df.columns:
-        return df.copy()
-
-    rows = []
-    for _, row in df.iterrows():
-        segs = row['segments']
-        if isinstance(segs, list) and segs:
-            for seg in segs:
-                new_row = row.copy()
-                new_row['segment'] = seg
-                rows.append(new_row)
-        else:
-            new_row = row.copy()
-            new_row['segment'] = 'Sem segmento'
-            rows.append(new_row)
-
-    if not rows:
-        return pd.DataFrame()
-
-    expanded = pd.DataFrame(rows).reset_index(drop=True)
-    return expanded
-
-
-def get_segment_stats(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculate aggregated statistics per market segment."""
-    if df.empty or 'segments' not in df.columns:
-        return pd.DataFrame()
-
-    expanded = expand_segments(df)
-    if expanded.empty:
-        return pd.DataFrame()
-
-    stats = (
-        expanded.groupby('segment')
-        .agg(
-            total=('id', 'count'),
-            positivo=('sentiment', lambda x: (x == 'positivo').sum()),
-            negativo=('sentiment', lambda x: (x == 'negativo').sum()),
-            neutro=('sentiment', lambda x: (x == 'neutro').sum()),
-            confianca_media=('confidence', 'mean'),
+def _table_exists(table: str, db_path: str = DB_PATH) -> bool:
+    try:
+        conn = _conn(db_path)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
         )
-        .reset_index()
-        .sort_values('total', ascending=False)
-    )
-    stats['confianca_media'] = stats['confianca_media'].round(3)
-    return stats
+        exists = cur.fetchone() is not None
+        conn.close()
+        return exists
+    except Exception:
+        return False
 
 
-def create_segment_bar_chart(df: pd.DataFrame):
-    """Create bar chart showing news distribution by segment."""
-    stats = get_segment_stats(df)
-    if stats.empty:
-        return None
-
-    fig = px.bar(
-        stats,
-        x='segment',
-        y='total',
-        title="Distribuição de Notícias por Segmento",
-        color='total',
-        color_continuous_scale='Blues',
-        labels={'segment': 'Segmento', 'total': 'Número de Notícias'},
-    )
-    fig.update_layout(xaxis_tickangle=-45, showlegend=False)
-    return fig
+def _news_columns(db_path: str = DB_PATH) -> List[str]:
+    try:
+        conn = _conn(db_path)
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(news)")
+        cols = [r[1] for r in cur.fetchall()]
+        conn.close()
+        return cols
+    except Exception:
+        return []
 
 
-def create_segment_sentiment_heatmap(df: pd.DataFrame):
-    """Create heatmap of segment vs sentiment."""
-    if df.empty or 'segments' not in df.columns:
-        return None
+# ---------------------------------------------------------------------------
+# Data loaders
+# ---------------------------------------------------------------------------
 
-    expanded = expand_segments(df)
-    if expanded.empty:
-        return None
-
-    pivot = pd.crosstab(expanded['segment'], expanded['sentiment'])
-
-    fig = px.imshow(
-        pivot,
-        title="Segmento vs Sentimento",
-        color_continuous_scale="Blues",
-        aspect="auto",
-        labels={'x': 'Sentimento', 'y': 'Segmento', 'color': 'Contagem'},
-    )
-    fig.update_layout(xaxis_title="Sentimento", yaxis_title="Segmento")
-    return fig
-
-
-def create_segment_sentiment_over_time(df: pd.DataFrame, segment: Optional[str] = None):
-    """Create time-series of sentiment counts by segment (or for a specific segment)."""
-    if df.empty or 'segments' not in df.columns or 'published_at' not in df.columns:
-        return None
-
-    expanded = expand_segments(df)
-    if expanded.empty:
-        return None
-
-    if segment and segment != "Todos":
-        expanded = expanded[expanded['segment'] == segment]
-
-    if expanded.empty:
-        return None
-
-    expanded = expanded.copy()
-    expanded['date'] = expanded['published_at'].dt.date
-
-    series = (
-        expanded.groupby(['date', 'segment', 'sentiment'])
-        .size()
-        .reset_index(name='count')
-    )
-
-    fig = px.line(
-        series,
-        x='date',
-        y='count',
-        color='segment',
-        line_dash='sentiment',
-        title="Evolução de Sentimentos por Segmento ao Longo do Tempo",
-        labels={'date': 'Data', 'count': 'Número de Notícias', 'segment': 'Segmento'},
-    )
-    fig.update_layout(xaxis_title="Data", yaxis_title="Número de Notícias", showlegend=True)
-    return fig
-
-
-def load_news_data(
-    source_filter: Optional[str] = None,
-    sentiment_filter: Optional[str] = None,
+def load_news(
+    source: Optional[str] = None,
+    sentiment: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    segment_filter: Optional[str] = None,
-    limit: int = 1000
+    segment: Optional[str] = None,
+    ticker: Optional[str] = None,
+    limit: int = 2000,
+    db_path: str = DB_PATH,
 ) -> pd.DataFrame:
-    """Load news data from database with filters."""
+    """Load enriched news from the database with optional filters."""
+    cols = _news_columns(db_path)
 
-    # Check if sentiment columns exist
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(news)")
-    columns = [row[1] for row in cursor.fetchall()]
-    has_sentiment = 'sentiment' in columns
-    has_confidence = 'confidence' in columns
-    has_segments = 'segments' in columns
-    has_tickers = 'tickers' in columns
-    conn.close()
+    def has(c: str) -> bool:
+        return c in cols
 
-    if has_sentiment and has_confidence and has_segments and has_tickers:
-        query = """
-        SELECT
-            id,
-            title,
-            content,
-            source,
-            published_at,
-            url,
-            collected_at,
-            sentiment,
-            confidence,
-            segments,
-            tickers
-        FROM news
-        WHERE 1=1
-        """
-    elif has_sentiment and has_confidence:
-        query = """
-        SELECT
-            id,
-            title,
-            content,
-            source,
-            published_at,
-            url,
-            collected_at,
-            sentiment,
-            confidence,
-            '[]' as segments,
-            '[]' as tickers
-        FROM news
-        WHERE 1=1
-        """
-    else:
-        query = """
-        SELECT
-            id,
-            title,
-            content,
-            source,
-            published_at,
-            url,
-            collected_at,
-            'neutro' as sentiment,
-            0.0 as confidence,
-            '[]' as segments,
-            '[]' as tickers
-        FROM news
-        WHERE 1=1
-        """
+    select = (
+        "id, title, content, source, published_at, url, collected_at, "
+        + ("sentiment, confidence, " if has("sentiment") else "'neutro' AS sentiment, 0.0 AS confidence, ")
+        + ("segments, " if has("segments") else "'[]' AS segments, ")
+        + ("tickers" if has("tickers") else "'[]' AS tickers")
+    )
 
-    params = []
+    query = f"SELECT {select} FROM news WHERE 1=1"
+    params: list = []
 
-    if source_filter and source_filter != "Todas":
+    if source and source != "Todas":
         query += " AND source = ?"
-        params.append(source_filter)
-
-    if sentiment_filter and sentiment_filter != "Todos" and has_sentiment:
+        params.append(source)
+    if sentiment and sentiment != "Todos" and has("sentiment"):
         query += " AND sentiment = ?"
-        params.append(sentiment_filter)
-
+        params.append(sentiment)
     if date_from:
         query += " AND published_at >= ?"
         params.append(date_from)
-
     if date_to:
         query += " AND published_at <= ?"
-        params.append(date_to)
-
+        params.append(date_to + " 23:59:59")
     query += " ORDER BY published_at DESC LIMIT ?"
     params.append(limit)
 
     try:
-        conn = get_db_connection()
+        conn = _conn(db_path)
         df = pd.read_sql_query(query, conn, params=params)
         conn.close()
-
-        # Convert dates
-        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
-        df['collected_at'] = pd.to_datetime(df['collected_at'], errors='coerce')
-        
-        # Parse JSON fields
-        if 'segments' in df.columns:
-            df['segments'] = df['segments'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
-        if 'tickers' in df.columns:
-            df['tickers'] = df['tickers'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
-
-        # Apply segment filter (post-filter since segments is a JSON column)
-        if segment_filter and segment_filter not in ("Todos", "Sem segmento") and 'segments' in df.columns:
-            df = df[df['segments'].apply(lambda segs: segment_filter in segs if isinstance(segs, list) else False)]
-
-        return df
     except Exception as e:
-        st.error(f"Erro ao carregar dados: {str(e)}")
+        st.error(f"Erro ao carregar notícias: {e}")
         return pd.DataFrame()
 
-
-def get_sentiment_stats(df: pd.DataFrame) -> Dict:
-    """Calculate sentiment statistics."""
     if df.empty:
-        return {
-            'total': 0,
-            'positivo': 0,
-            'negativo': 0,
-            'neutro': 0,
-            'avg_confidence': 0.0,
-            'has_sentiment': False
-        }
-
-    # Check if sentiment data exists (real data, not just default 'neutro')
-    has_sentiment = 'sentiment' in df.columns and df['sentiment'].notna().any() and not df['sentiment'].eq('neutro').all()
-    has_confidence = 'confidence' in df.columns and df['confidence'].notna().any() and (df['confidence'] > 0).any()
-
-    if has_sentiment:
-        stats = {
-            'total': len(df),
-            'positivo': len(df[df['sentiment'] == 'positivo']),
-            'negativo': len(df[df['sentiment'] == 'negativo']),
-            'neutro': len(df[df['sentiment'] == 'neutro']),
-            'avg_confidence': df['confidence'].mean() if has_confidence else 0.0,
-            'has_sentiment': True
-        }
-    else:
-        stats = {
-            'total': len(df),
-            'positivo': 0,
-            'negativo': 0,
-            'neutro': len(df),  # All are neutral by default
-            'avg_confidence': 0.0,
-            'has_sentiment': False
-        }
-
-    return stats
-
-
-def check_sentiment_availability() -> bool:
-    """Check if sentiment data is available in the database."""
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(news)")
-        columns = [row[1] for row in cursor.fetchall()]
-        has_sentiment = 'sentiment' in columns
-
-        if has_sentiment:
-            # Check if there's any non-null sentiment data
-            cursor.execute("SELECT COUNT(*) FROM news WHERE sentiment IS NOT NULL")
-            count = cursor.fetchone()[0]
-            has_sentiment = count > 0
-
-        conn.close()
-        return has_sentiment
-    except:
-        return False
-
-
-def create_sentiment_pie_chart(df: pd.DataFrame):
-    """Create sentiment distribution pie chart."""
-    if df.empty:
-        return None
-
-    sentiment_counts = df['sentiment'].value_counts()
-
-    colors = {
-        'positivo': '#00ff00',
-        'negativo': '#ff0000',
-        'neutro': '#ffff00'
-    }
-
-    fig = px.pie(
-        values=sentiment_counts.values,
-        names=sentiment_counts.index,
-        title="Distribuição de Sentimentos",
-        color=sentiment_counts.index,
-        color_discrete_map=colors
-    )
-
-    fig.update_traces(textposition='inside', textinfo='percent+label')
-    return fig
-
-
-def create_confidence_histogram(df: pd.DataFrame):
-    """Create confidence score histogram."""
-    if df.empty or 'confidence' not in df.columns:
-        return None
-
-    fig = px.histogram(
-        df,
-        x='confidence',
-        nbins=20,
-        title="Distribuição de Confiança",
-        color='sentiment',
-        color_discrete_map={
-            'positivo': '#00ff00',
-            'negativo': '#ff0000',
-            'neutro': '#ffff00'
-        }
-    )
-
-    fig.update_layout(
-        xaxis_title="Pontuação de Confiança",
-        yaxis_title="Contagem",
-        showlegend=True
-    )
-
-    return fig
-
-
-def create_sentiment_over_time(df: pd.DataFrame):
-    """Create sentiment trend over time."""
-    if df.empty or 'published_at' not in df.columns:
-        return None
-
-    # Group by date and sentiment
-    df_time = df.copy()
-    df_time['date'] = df_time['published_at'].dt.date
-
-    sentiment_over_time = df_time.groupby(['date', 'sentiment']).size().reset_index(name='count')
-
-    fig = px.line(
-        sentiment_over_time,
-        x='date',
-        y='count',
-        color='sentiment',
-        title="Evolução de Sentimentos ao Longo do Tempo",
-        color_discrete_map={
-            'positivo': '#00ff00',
-            'negativo': '#ff0000',
-            'neutro': '#ffff00'
-        }
-    )
-
-    fig.update_layout(
-        xaxis_title="Data",
-        yaxis_title="Número de Notícias",
-        showlegend=True
-    )
-
-    return fig
-
-
-def create_source_sentiment_heatmap(df: pd.DataFrame):
-    """Create source vs sentiment heatmap."""
-    if df.empty:
-        return None
-
-    # Create pivot table
-    pivot = pd.crosstab(df['source'], df['sentiment'])
-
-    fig = px.imshow(
-        pivot,
-        title="Fonte vs Sentimento",
-        color_continuous_scale="Blues",
-        aspect="auto"
-    )
-
-    fig.update_layout(
-        xaxis_title="Sentimento",
-        yaxis_title="Fonte"
-    )
-
-    return fig
-
-
-def main():
-    """Main Streamlit application."""
-
-    st.set_page_config(
-        page_title="B3 Market Feeling Detector",
-        page_icon="📈",
-        layout="wide"
-    )
-
-    st.title("📈 B3 Market Feeling Detector")
-    st.markdown("Dashboard de Análise de Sentimento de Notícias Financeiras")
-
-    # API key warning
-    if not os.getenv("OPENAI_API_KEY"):
-        st.warning("⚠️ A variável de ambiente OPENAI_API_KEY não está configurada. Configure o arquivo .env e reinicie o dashboard para habilitar análise de sentimento.")
-
-    tab_news, tab_market = st.tabs(["📰 Notícias & Sentimento", "📊 Dados de Mercado"])
-
-    with tab_news:
-        _render_news_tab()
-
-    with tab_market:
-        _render_market_tab()
-
-
-def _render_news_tab():
-    """Render the news sentiment tab content."""
-    # Sidebar filters
-    st.sidebar.header("🔍 Filtros")
-
-    # Check if sentiment data is available
-    has_sentiment_data = check_sentiment_availability()
-
-    # Source filter
-    try:
-        conn = get_db_connection()
-        sources = pd.read_sql_query("SELECT DISTINCT source FROM news ORDER BY source", conn)['source'].tolist()
-        conn.close()
-        sources.insert(0, "Todas")
-    except Exception:
-        sources = ["Todas"]
-
-    source_filter = st.sidebar.selectbox("Fonte", sources)
-
-    # Sentiment filter
-    if has_sentiment_data:
-        sentiment_options = ["Todos", "positivo", "negativo", "neutro"]
-        sentiment_filter = st.sidebar.selectbox("Sentimento", sentiment_options)
-    else:
-        st.sidebar.info("🎯 Filtro de sentimento disponível após análise completa")
-        sentiment_filter = "Todos"
-
-    # Segment filter (populated from all available segments in the database)
-    try:
-        conn = get_db_connection()
-        seg_df = pd.read_sql_query("SELECT segments FROM news WHERE segments IS NOT NULL AND segments != '[]'", conn)
-        conn.close()
-        all_segments: List[str] = []
-        for raw in seg_df['segments']:
-            try:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(parsed, list):
-                    all_segments.extend(parsed)
-            except Exception:
-                pass
-        unique_segments = sorted(set(all_segments))
-        unique_segments.insert(0, "Todos")
-    except Exception:
-        unique_segments = ["Todos"]
-
-    segment_filter = st.sidebar.selectbox("Segmento", unique_segments)
-
-    # Date filters
-    col1, col2 = st.sidebar.columns(2)
-
-    with col1:
-        date_from = st.date_input(
-            "Data Inicial",
-            value=datetime.now() - timedelta(days=7),
-            key="date_from"
-        )
-
-    with col2:
-        date_to = st.date_input(
-            "Data Final",
-            value=datetime.now(),
-            key="date_to"
-        )
-
-    # Convert dates to string format
-    date_from_str = date_from.strftime("%Y-%m-%d") if date_from else None
-    date_to_str = date_to.strftime("%Y-%m-%d") if date_to else None
-
-    # Load data
-    df = load_news_data(
-        source_filter=source_filter,
-        sentiment_filter=sentiment_filter,
-        date_from=date_from_str,
-        date_to=date_to_str,
-        segment_filter=segment_filter,
-    )
-
-    # Statistics
-    stats = get_sentiment_stats(df)
-
-    # Main content
-    col1, col2, col3, col4, col5 = st.columns(5)
-
-    with col1:
-        st.metric("Total de Notícias", stats['total'])
-
-    with col2:
-        if stats['has_sentiment']:
-            st.metric("Positivo", stats['positivo'], delta=f"{stats['positivo']/stats['total']*100:.1f}%" if stats['total'] > 0 else "0%")
-        else:
-            st.metric("Positivo", "N/A", delta="Análise pendente")
-
-    with col3:
-        if stats['has_sentiment']:
-            st.metric("Negativo", stats['negativo'], delta=f"{stats['negativo']/stats['total']*100:.1f}%" if stats['total'] > 0 else "0%")
-        else:
-            st.metric("Negativo", "N/A", delta="Análise pendente")
-
-    with col4:
-        if stats['has_sentiment']:
-            st.metric("Neutro", stats['neutro'], delta=f"{stats['neutro']/stats['total']*100:.1f}%" if stats['total'] > 0 else "0%")
-        else:
-            st.metric("Neutro", stats['total'], delta="Dados básicos")
-
-    with col5:
-        if stats['has_sentiment']:
-            st.metric("Confiança Média", f"{stats['avg_confidence']:.2f}")
-        else:
-            st.metric("Confiança Média", "N/A", delta="Análise pendente")
-
-    # Warning if no sentiment data
-    if not stats['has_sentiment']:
-        st.warning("⚠️ **Análise de sentimento não executada ainda.** Configure a API key do OpenAI e execute o pipeline completo para ver as análises de sentimento.")
-
-    # Charts
-    if not df.empty and stats['has_sentiment']:
-        st.header("📊 Visualizações")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            pie_chart = create_sentiment_pie_chart(df)
-            if pie_chart:
-                st.plotly_chart(pie_chart, use_container_width=True)
-
-        with col2:
-            hist_chart = create_confidence_histogram(df)
-            if hist_chart:
-                st.plotly_chart(hist_chart, use_container_width=True)
-
-        # Time series chart
-        time_chart = create_sentiment_over_time(df)
-        if time_chart:
-            st.plotly_chart(time_chart, use_container_width=True)
-
-        # Source vs sentiment heatmap
-        heatmap = create_source_sentiment_heatmap(df)
-        if heatmap:
-            st.plotly_chart(heatmap, use_container_width=True)
-    elif not df.empty:
-        st.header("📊 Visualizações")
-        st.info("📈 Execute a análise de sentimento para ver gráficos e visualizações detalhadas.")
-
-    # Segment analysis section
-    st.header("📦 Análise por Segmento")
-
-    segment_stats = get_segment_stats(df)
-
-    if segment_stats.empty:
-        st.info("Nenhum dado de segmento disponível para as notícias filtradas.")
-    else:
-        # Summary cards
-        num_segments = len(segment_stats)
-        top_segment = segment_stats.iloc[0]['segment']
-        avg_conf_seg = segment_stats['confianca_media'].mean()
-
-        card_col1, card_col2, card_col3 = st.columns(3)
-        with card_col1:
-            st.metric("Segmentos Identificados", num_segments)
-        with card_col2:
-            st.metric("Segmento Mais Frequente", top_segment)
-        with card_col3:
-            if avg_conf_seg > 0:
-                st.metric("Confiança Média (segmentos)", f"{avg_conf_seg:.3f}")
-            else:
-                st.metric("Confiança Média (segmentos)", "N/A")
-
-        # Charts row
-        seg_col1, seg_col2 = st.columns(2)
-
-        with seg_col1:
-            bar_chart = create_segment_bar_chart(df)
-            if bar_chart:
-                st.plotly_chart(bar_chart, use_container_width=True)
-
-        with seg_col2:
-            seg_heatmap = create_segment_sentiment_heatmap(df)
-            if seg_heatmap:
-                st.plotly_chart(seg_heatmap, use_container_width=True)
-            elif not stats['has_sentiment']:
-                st.info("Mapa de calor disponível após análise de sentimento.")
-
-        # Temporal series
-        time_seg_chart = create_segment_sentiment_over_time(df, segment=segment_filter)
-        if time_seg_chart:
-            st.plotly_chart(time_seg_chart, use_container_width=True)
-
-        # Aggregated statistics table
-        st.subheader("📋 Estatísticas por Segmento")
-        display_stats = segment_stats.rename(columns={
-            'segment': 'Segmento',
-            'total': 'Total',
-            'positivo': 'Positivo',
-            'negativo': 'Negativo',
-            'neutro': 'Neutro',
-            'confianca_media': 'Confiança Média',
-        })
-        st.dataframe(display_stats, use_container_width=True, hide_index=True)
-
-    # News table
-    st.header("📰 Notícias")
-
-    if df.empty:
-        st.warning("Nenhuma notícia encontrada com os filtros aplicados.")
-    else:
-        # Format dataframe for display
-        display_df = df.copy()
-        display_df['published_at'] = display_df['published_at'].dt.strftime('%Y-%m-%d %H:%M')
-        display_df['collected_at'] = display_df['collected_at'].dt.strftime('%Y-%m-%d %H:%M')
-        display_df['confidence'] = display_df['confidence'].round(3)
-
-        # Add sentiment colors
-        def color_sentiment(val):
-            if val == 'positivo':
-                return 'background-color: #d4edda; color: #155724'
-            elif val == 'negativo':
-                return 'background-color: #f8d7da; color: #721c24'
-            else:
-                return 'background-color: #fff3cd; color: #856404'
-
-        # Display table with expandable content
-        for idx, row in display_df.iterrows():
-            with st.expander(f"📰 {row['title']} - {row['source']} ({row['sentiment']})"):
-                col1, col2 = st.columns([3, 1])
-
-                with col1:
-                    st.markdown(f"**Conteúdo:** {row['content'] or 'N/A'}")
-                    st.markdown(f"**URL:** [{row['url']}]({row['url']})")
-
-                with col2:
-                    st.markdown(f"**Fonte:** {row['source']}")
-                    st.markdown(f"**Sentimento:** {row['sentiment']}")
-                    st.markdown(f"**Confiança:** {row['confidence']:.3f}")
-                    if 'segments' in row and row['segments']:
-                        st.markdown(f"**Segmentos:** {', '.join(row['segments'])}")
-                    if 'tickers' in row and row['tickers']:
-                        st.markdown(f"**Tickers:** {', '.join(row['tickers'])}")
-                    st.markdown(f"**Publicado:** {row['published_at']}")
-                    st.markdown(f"**Coletado:** {row['collected_at']}")
-
-    # Footer
-    st.markdown("---")
-    st.markdown("💡 **Dicas:**")
-    st.markdown("- Use os filtros na barra lateral para explorar os dados")
-    st.markdown("- Clique nas notícias para ver o conteúdo completo")
-    st.markdown("- Os gráficos mostram tendências e distribuições dos sentimentos")
-
-
-# ---------------------------------------------------------------------------
-# Market data tab helpers
-# ---------------------------------------------------------------------------
-
-def _load_correlations(db_path: str = "data/news.db", limit: int = 500) -> pd.DataFrame:
-    """Load news–price correlation records joined with news metadata."""
-    query = """
-        SELECT
-            c.news_id,
-            c.ticker,
-            c.news_date,
-            c.sentiment,
-            c.confidence,
-            c.d0_var,
-            c.d1_var,
-            c.d5_var,
-            n.title,
-            n.source
-        FROM news_price_correlation c
-        JOIN news n ON n.id = c.news_id
-        ORDER BY c.news_date DESC
-        LIMIT ?
-    """
-    try:
-        conn = sqlite3.connect(db_path)
-        df = pd.read_sql_query(query, conn, params=(limit,))
-        conn.close()
-        df['news_date'] = pd.to_datetime(df['news_date'], errors='coerce')
         return df
-    except Exception as e:
-        st.error(f"Erro ao carregar correlações: {e}")
+
+    df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce")
+    df["collected_at"] = pd.to_datetime(df["collected_at"], errors="coerce")
+
+    for col in ("segments", "tickers"):
+        df[col] = df[col].apply(
+            lambda x: json.loads(x) if isinstance(x, str) and x else []
+        )
+
+    # post-filter by segment
+    if segment and segment not in ("Todos", "Sem segmento"):
+        df = df[df["segments"].apply(lambda s: segment in s if isinstance(s, list) else False)]
+
+    # post-filter by ticker
+    if ticker:
+        df = df[df["tickers"].apply(lambda t: ticker in t if isinstance(t, list) else False)]
+
+    return df.reset_index(drop=True)
+
+
+def load_asset_prices(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
+    if not _table_exists("asset_prices", db_path):
         return pd.DataFrame()
-
-
-def _load_asset_prices(ticker: str, db_path: str = "data/news.db") -> pd.DataFrame:
-    """Load stored daily prices for a single ticker."""
     query = """
         SELECT date, open, close, high, low, avg_price, volume
-        FROM asset_prices
-        WHERE ticker = ?
-        ORDER BY date ASC
+        FROM asset_prices WHERE ticker = ? ORDER BY date ASC
     """
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _conn(db_path)
         df = pd.read_sql_query(query, conn, params=(ticker,))
         conn.close()
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
         return df
     except Exception as e:
         st.error(f"Erro ao carregar preços para {ticker}: {e}")
         return pd.DataFrame()
 
 
-def _load_tickers_in_db(db_path: str = "data/news.db") -> List[str]:
-    """Return tickers that have price data in asset_prices."""
+def load_tickers(db_path: str = DB_PATH) -> List[str]:
+    if not _table_exists("asset_prices", db_path):
+        return []
     try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='asset_prices'")
-        if not cursor.fetchone():
-            conn.close()
-            return []
+        conn = _conn(db_path)
         df = pd.read_sql_query(
             "SELECT DISTINCT ticker FROM asset_prices ORDER BY ticker", conn
         )
         conn.close()
-        return df['ticker'].tolist()
-    except Exception as e:
-        st.error(f"Erro ao carregar lista de ativos: {e}")
+        return df["ticker"].tolist()
+    except Exception:
         return []
 
 
-def _create_price_with_news_chart(price_df: pd.DataFrame, news_df: pd.DataFrame, ticker: str):
-    """Line chart of closing price annotated with news sentiment events."""
-    if price_df.empty:
-        return None
+def load_companies(db_path: str = DB_PATH) -> pd.DataFrame:
+    if not _table_exists("companies", db_path):
+        return pd.DataFrame()
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query("SELECT ticker, name, tipo_papel FROM companies", conn)
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
-    fig = go.Figure()
 
-    fig.add_trace(go.Scatter(
-        x=price_df['date'],
-        y=price_df['close'],
-        mode='lines',
-        name='Fechamento',
-        line=dict(color='#1f77b4', width=2),
-    ))
+def load_correlations(limit: int = 2000, db_path: str = DB_PATH) -> pd.DataFrame:
+    if not _table_exists("news_price_correlation", db_path):
+        return pd.DataFrame()
+    query = """
+        SELECT c.news_id, c.ticker, c.news_date, c.sentiment, c.confidence,
+               c.d0_var, c.d1_var, c.d5_var, n.title, n.source
+        FROM news_price_correlation c
+        JOIN news n ON n.id = c.news_id
+        ORDER BY c.news_date DESC LIMIT ?
+    """
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(query, conn, params=(limit,))
+        conn.close()
+        df["news_date"] = pd.to_datetime(df["news_date"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar correlações: {e}")
+        return pd.DataFrame()
 
-    if not news_df.empty:
-        ticker_news = news_df[news_df['ticker'] == ticker].copy()
 
-        # Build a date → close lookup for annotating events on the price line
-        price_lookup = (
-            price_df.set_index(price_df['date'].dt.normalize())['close'].to_dict()
+# ---------------------------------------------------------------------------
+# Segment helpers
+# ---------------------------------------------------------------------------
+
+def expand_segments(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "segments" not in df.columns:
+        return df.copy()
+    rows = []
+    for _, row in df.iterrows():
+        segs = row["segments"]
+        if isinstance(segs, list) and segs:
+            for seg in segs:
+                r = row.copy()
+                r["segment"] = seg
+                rows.append(r)
+        else:
+            r = row.copy()
+            r["segment"] = "Sem segmento"
+            rows.append(r)
+    return pd.DataFrame(rows).reset_index(drop=True) if rows else pd.DataFrame()
+
+
+def get_segment_stats(df: pd.DataFrame) -> pd.DataFrame:
+    expanded = expand_segments(df)
+    if expanded.empty:
+        return pd.DataFrame()
+    stats = (
+        expanded.groupby("segment")
+        .agg(
+            total=("id", "count"),
+            positivo=("sentiment", lambda x: (x == "positivo").sum()),
+            negativo=("sentiment", lambda x: (x == "negativo").sum()),
+            neutro=("sentiment", lambda x: (x == "neutro").sum()),
+            confianca_media=("confidence", "mean"),
         )
+        .reset_index()
+        .sort_values("total", ascending=False)
+    )
+    stats["confianca_media"] = stats["confianca_media"].round(3)
+    # Use max(total, 1) to avoid division by zero for segments with no news
+    safe_total = stats["total"].clip(lower=1)
+    stats["pct_positivo"] = (stats["positivo"] / safe_total * 100).round(1)
+    stats["pct_negativo"] = (stats["negativo"] / safe_total * 100).round(1)
+    return stats
 
-        for sentiment, color, symbol in [
-            ('positivo', '#2ca02c', 'triangle-up'),
-            ('negativo', '#d62728', 'triangle-down'),
-            ('neutro', '#ff7f0e', 'circle'),
-        ]:
-            subset = ticker_news[ticker_news['sentiment'] == sentiment].copy()
-            if subset.empty:
-                continue
 
-            subset['_date_key'] = subset['news_date'].dt.normalize()
-            subset['_y'] = subset['_date_key'].map(price_lookup)
+def get_segment_price_stats(corr_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.DataFrame:
+    """Merge segment info from news with price variation from correlations."""
+    if corr_df.empty or news_df.empty:
+        return pd.DataFrame()
 
-            # Keep only rows where a matching price exists
-            subset = subset.dropna(subset=['_y'])
-            if subset.empty:
-                continue
+    # Build ticker → segments lookup from news
+    ticker_seg_rows = []
+    for _, row in news_df.iterrows():
+        tickers = row.get("tickers", [])
+        segs = row.get("segments", [])
+        if isinstance(tickers, list) and isinstance(segs, list):
+            for ticker in tickers:
+                for seg in segs:
+                    ticker_seg_rows.append({"ticker": ticker, "segment": seg})
 
-            fig.add_trace(go.Scatter(
-                x=subset['news_date'],
-                y=subset['_y'],
-                mode='markers',
-                name=f'Notícia {sentiment}',
-                marker=dict(color=color, size=10, symbol=symbol),
-                text=subset['title'],
-                hovertemplate='%{text}<extra></extra>',
-            ))
+    if not ticker_seg_rows:
+        return pd.DataFrame()
 
-    fig.update_layout(
-        title=f"Preço de Fechamento — {ticker}",
-        xaxis_title="Data",
-        yaxis_title="Preço (R$)",
-        legend_title="Legenda",
+    ticker_seg = pd.DataFrame(ticker_seg_rows).drop_duplicates()
+    merged = corr_df.merge(ticker_seg, on="ticker", how="left")
+    merged = merged.dropna(subset=["segment"])
+
+    if merged.empty:
+        return pd.DataFrame()
+
+    stats = (
+        merged.groupby("segment")
+        .agg(
+            avg_d0=(  "d0_var", lambda x: (x.dropna() * 100).mean()),
+            avg_d1=(  "d1_var", lambda x: (x.dropna() * 100).mean()),
+            avg_d5=(  "d5_var", lambda x: (x.dropna() * 100).mean()),
+            n_pares=( "news_id", "count"),
+        )
+        .reset_index()
+    )
+    for col in ("avg_d0", "avg_d1", "avg_d5"):
+        stats[col] = stats[col].round(2)
+    return stats.sort_values("n_pares", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Chart builders
+# ---------------------------------------------------------------------------
+
+def _segment_bar(df: pd.DataFrame):
+    stats = get_segment_stats(df)
+    if stats.empty:
+        return None
+    fig = px.bar(
+        stats, x="segment", y="total",
+        title="Notícias por Segmento",
+        color="total", color_continuous_scale="Blues",
+        labels={"segment": "Segmento", "total": "Notícias"},
+    )
+    fig.update_layout(xaxis_tickangle=-45, showlegend=False)
+    return fig
+
+
+def _segment_sentiment_heatmap(df: pd.DataFrame):
+    expanded = expand_segments(df)
+    if expanded.empty or "sentiment" not in expanded.columns:
+        return None
+    pivot = pd.crosstab(expanded["segment"], expanded["sentiment"])
+    fig = px.imshow(
+        pivot, title="Sentimento por Segmento",
+        color_continuous_scale="Blues", aspect="auto",
+        labels={"x": "Sentimento", "y": "Segmento", "color": "Contagem"},
     )
     return fig
 
 
-def _create_sentiment_vs_return_scatter(corr_df: pd.DataFrame, horizon: str = "d1_var"):
-    """Scatter plot: sentiment vs price return for a given horizon."""
+def _sentiment_over_time(df: pd.DataFrame):
+    if df.empty or "published_at" not in df.columns:
+        return None
+    tmp = df.copy()
+    tmp["date"] = tmp["published_at"].dt.date
+    series = tmp.groupby(["date", "sentiment"]).size().reset_index(name="count")
+    fig = px.line(
+        series, x="date", y="count", color="sentiment",
+        title="Evolução de Sentimentos ao Longo do Tempo",
+        color_discrete_map=SENTIMENT_COLORS,
+        labels={"date": "Data", "count": "Notícias", "sentiment": "Sentimento"},
+    )
+    return fig
+
+
+def _price_chart(price_df: pd.DataFrame, corr_df: pd.DataFrame, ticker: str):
+    if price_df.empty:
+        return None
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=price_df["date"], y=price_df["close"],
+        mode="lines", name="Fechamento",
+        line=dict(color="#1f77b4", width=2),
+    ))
+    if not corr_df.empty:
+        ticker_news = corr_df[corr_df["ticker"] == ticker].copy()
+        price_lookup = price_df.set_index(price_df["date"].dt.normalize())["close"].to_dict()
+        for sentiment, color, symbol in [
+            ("positivo", "#2ca02c", "triangle-up"),
+            ("negativo", "#d62728", "triangle-down"),
+            ("neutro",   "#ff7f0e", "circle"),
+        ]:
+            subset = ticker_news[ticker_news["sentiment"] == sentiment].copy()
+            if subset.empty:
+                continue
+            subset["_dk"] = subset["news_date"].dt.normalize()
+            subset["_y"] = subset["_dk"].map(price_lookup)
+            subset = subset.dropna(subset=["_y"])
+            if subset.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=subset["news_date"], y=subset["_y"],
+                mode="markers",
+                name=f"Notícia {sentiment}",
+                marker=dict(color=color, size=10, symbol=symbol),
+                text=subset["title"],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+    fig.update_layout(
+        title=f"Preço de Fechamento — {ticker}",
+        xaxis_title="Data", yaxis_title="Preço (R$)",
+    )
+    return fig
+
+
+def _scatter_sentiment_return(corr_df: pd.DataFrame, horizon: str = "d1_var"):
     if corr_df.empty or horizon not in corr_df.columns:
         return None
-
     label_map = {"d0_var": "D0 (intraday)", "d1_var": "D+1", "d5_var": "D+5"}
-    label = label_map.get(horizon, horizon)
-
     plot_df = corr_df[corr_df[horizon].notna()].copy()
     if plot_df.empty:
         return None
-
-    plot_df[horizon] = plot_df[horizon] * 100  # convert to percentage
-
+    plot_df[horizon] = plot_df[horizon] * 100
     fig = px.strip(
-        plot_df,
-        x='sentiment',
-        y=horizon,
-        color='sentiment',
-        hover_data=['ticker', 'title', 'news_date'],
-        color_discrete_map={
-            'positivo': '#2ca02c',
-            'negativo': '#d62728',
-            'neutro': '#ff7f0e',
-        },
-        title=f"Sentimento vs Retorno {label} (%)",
-        labels={'sentiment': 'Sentimento', horizon: f'Retorno {label} (%)'},
+        plot_df, x="sentiment", y=horizon, color="sentiment",
+        hover_data=["ticker", "title", "news_date"],
+        color_discrete_map=SENTIMENT_COLORS,
+        title=f"Sentimento vs Retorno {label_map.get(horizon, horizon)} (%)",
+        labels={"sentiment": "Sentimento", horizon: f"Retorno (%)"},
     )
-    fig.add_hline(y=0, line_dash='dash', line_color='gray')
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
     return fig
 
 
-def _create_correlation_heatmap(corr_df: pd.DataFrame):
-    """Heatmap of average returns grouped by ticker and sentiment."""
-    if corr_df.empty:
+def _candlestick_chart(price_df: pd.DataFrame, ticker: str):
+    if price_df.empty:
         return None
-
-    needed = ['ticker', 'sentiment', 'd1_var']
-    if not all(c in corr_df.columns for c in needed):
-        return None
-
-    pivot = (
-        corr_df[needed]
-        .dropna()
-        .groupby(['ticker', 'sentiment'])['d1_var']
-        .mean()
-        .unstack(fill_value=0)
-        * 100
+    fig = go.Figure(go.Candlestick(
+        x=price_df["date"],
+        open=price_df["open"], high=price_df["high"],
+        low=price_df["low"], close=price_df["close"],
+        name=ticker,
+    ))
+    fig.update_layout(
+        title=f"Candlestick — {ticker}",
+        xaxis_title="Data", yaxis_title="Preço (R$)",
+        xaxis_rangeslider_visible=False,
     )
-
-    if pivot.empty:
-        return None
-
-    fig = px.imshow(
-        pivot,
-        title="Retorno Médio D+1 (%) por Ticker e Sentimento",
-        color_continuous_scale="RdYlGn",
-        aspect="auto",
-        labels={"color": "Retorno Médio D+1 (%)"},
-    )
-    fig.update_layout(xaxis_title="Sentimento", yaxis_title="Ticker")
     return fig
 
 
-def _render_market_tab():
-    """Render the Market Data tab."""
-    st.header("📊 Dados de Mercado — Correlação Notícias × Preços B3")
+# ---------------------------------------------------------------------------
+# Tab renderers
+# ---------------------------------------------------------------------------
 
-    db_path = "data/news.db"
+def _render_overview_tab():
+    """📊 Home: aggregated metrics by segment."""
+    st.header("📊 Visão Geral do Mercado")
 
-    # Check that the table exists
-    tickers_available = _load_tickers_in_db(db_path)
+    df = load_news(limit=5000)
+    corr_df = load_correlations()
 
-    if not tickers_available:
+    if df.empty:
         st.info(
-            "🔄 Nenhum dado de mercado encontrado ainda.  "
-            "Execute o pipeline (`python main.py`) para buscar cotações e calcular correlações."
+            "🔄 Nenhum dado disponível ainda. Execute o pipeline primeiro:\n"
+            "```\npython main.py --stage all\n```"
         )
         return
 
-    corr_df = _load_correlations(db_path)
+    has_sentiment = (
+        "sentiment" in df.columns
+        and df["sentiment"].notna().any()
+        and not df["sentiment"].eq("neutro").all()
+    )
 
-    # ------------------------------------------------------------------ #
-    # Summary metrics
-    # ------------------------------------------------------------------ #
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Ativos com preço", len(tickers_available))
-    with col2:
-        st.metric("Pares notícia–ativo", len(corr_df))
-    with col3:
-        if not corr_df.empty and 'd1_var' in corr_df.columns:
-            avg_d1 = corr_df['d1_var'].dropna().mean() * 100
-            st.metric("Retorno médio D+1", f"{avg_d1:.2f}%")
-        else:
-            st.metric("Retorno médio D+1", "N/A")
+    # --- KPIs ---------------------------------------------------------------
+    total = len(df)
+    pos = int((df["sentiment"] == "positivo").sum()) if has_sentiment else 0
+    neg = int((df["sentiment"] == "negativo").sum()) if has_sentiment else 0
+    neu = int((df["sentiment"] == "neutro").sum()) if has_sentiment else total
+
+    tickers_count = len(load_tickers())
+    segs_count = len(
+        {s for segs in df["segments"] for s in (segs if isinstance(segs, list) else [])}
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total de Notícias", total)
+    c2.metric("Positivas", pos, delta=f"{pos/total*100:.1f}%" if total else "0%")
+    c3.metric("Negativas", neg, delta=f"{neg/total*100:.1f}%" if total else "0%")
+    c4.metric("Neutras", neu)
+    c5.metric("Ativos Rastreados", tickers_count)
+
+    if not has_sentiment:
+        st.warning(
+            "⚠️ Análise de sentimento ainda não executada. "
+            "Configure `OPENAI_API_KEY` e rode `python main.py --stage trusted`."
+        )
 
     st.divider()
 
-    # ------------------------------------------------------------------ #
-    # Scatter: sentiment vs return
-    # ------------------------------------------------------------------ #
-    st.subheader("Sentimento vs Retorno de Preço")
-    horizon = st.selectbox(
-        "Horizonte de retorno",
-        options=["d1_var", "d0_var", "d5_var"],
-        format_func=lambda x: {"d0_var": "D0 (intraday)", "d1_var": "D+1", "d5_var": "D+5"}[x],
-        key="horizon_select",
+    # --- Segment table + price variations -----------------------------------
+    st.subheader("📦 Métricas por Segmento")
+
+    seg_stats = get_segment_stats(df)
+    seg_price = get_segment_price_stats(corr_df, df)
+
+    if not seg_stats.empty:
+        if not seg_price.empty:
+            seg_stats = seg_stats.merge(seg_price[["segment", "avg_d0", "avg_d1", "avg_d5"]], on="segment", how="left")
+
+        display = seg_stats.rename(columns={
+            "segment": "Segmento", "total": "Notícias",
+            "positivo": "Positivas", "negativo": "Negativas", "neutro": "Neutras",
+            "pct_positivo": "% Pos", "pct_negativo": "% Neg",
+            "confianca_media": "Confiança Méd.",
+            "avg_d0": "Var. D0 (%)", "avg_d1": "Var. D+1 (%)", "avg_d5": "Var. D+5 (%)",
+        })
+        # select columns that actually exist
+        show_cols = [c for c in [
+            "Segmento", "Notícias", "Positivas", "% Pos", "Negativas", "% Neg",
+            "Confiança Méd.", "Var. D0 (%)", "Var. D+1 (%)", "Var. D+5 (%)"
+        ] if c in display.columns]
+        st.dataframe(display[show_cols], use_container_width=True, hide_index=True)
+
+    # --- Charts row ---------------------------------------------------------
+    col_a, col_b = st.columns(2)
+    with col_a:
+        bar = _segment_bar(df)
+        if bar:
+            st.plotly_chart(bar, use_container_width=True)
+    with col_b:
+        hm = _segment_sentiment_heatmap(df)
+        if hm:
+            st.plotly_chart(hm, use_container_width=True)
+        elif not has_sentiment:
+            st.info("Mapa de calor disponível após análise de sentimento.")
+
+    # --- Sentiment over time ------------------------------------------------
+    ot = _sentiment_over_time(df)
+    if ot:
+        st.plotly_chart(ot, use_container_width=True)
+
+
+def _render_asset_tab():
+    """📈 Asset-centric view: price chart + related news."""
+    st.header("📈 Por Ativo")
+
+    tickers = load_tickers()
+    companies_df = load_companies()
+    corr_df = load_correlations()
+
+    if not tickers:
+        st.info(
+            "🔄 Nenhum dado de preço encontrado ainda. Execute:\n"
+            "```\n# Backfill histórico desde 2025-01-01\n"
+            "python main.py --stage backfill\n```"
+        )
+        return
+
+    # Sidebar selector
+    selected = st.selectbox("Selecione o ativo", options=tickers, key="asset_select")
+    if not selected:
+        return
+
+    # Company info
+    if not companies_df.empty:
+        row = companies_df[companies_df["ticker"] == selected]
+        if not row.empty:
+            info = row.iloc[0]
+            st.caption(f"**{info.get('name', selected)}** — {info.get('tipo_papel', '')}")
+
+    price_df = load_asset_prices(selected)
+
+    # --- KPIs ---------------------------------------------------------------
+    ticker_corr = corr_df[corr_df["ticker"] == selected] if not corr_df.empty else pd.DataFrame()
+
+    c1, c2, c3, c4 = st.columns(4)
+    if not price_df.empty:
+        last_close = price_df["close"].iloc[-1]
+        prev_close = price_df["close"].iloc[-2] if len(price_df) > 1 else last_close
+        delta_pct = (last_close - prev_close) / prev_close * 100 if prev_close else 0
+        c1.metric("Último Fechamento", f"R$ {last_close:.2f}", delta=f"{delta_pct:+.2f}%")
+        c2.metric("Mínima Histórica (período)", f"R$ {price_df['low'].min():.2f}")
+        c3.metric("Máxima Histórica (período)", f"R$ {price_df['high'].max():.2f}")
+    else:
+        c1.metric("Último Fechamento", "N/A")
+        c2.metric("Mínima", "N/A")
+        c3.metric("Máxima", "N/A")
+
+    news_count = len(ticker_corr) if not ticker_corr.empty else 0
+    c4.metric("Notícias Relacionadas", news_count)
+
+    # --- Price chart --------------------------------------------------------
+    chart_type = st.radio(
+        "Tipo de gráfico", ["Linha (Fechamento)", "Candlestick"],
+        horizontal=True, key="chart_type",
     )
-    scatter = _create_sentiment_vs_return_scatter(corr_df, horizon)
-    if scatter:
-        st.plotly_chart(scatter, use_container_width=True)
+    if chart_type == "Candlestick":
+        fig = _candlestick_chart(price_df, selected)
     else:
-        st.info("Dados insuficientes para o gráfico de dispersão.")
+        fig = _price_chart(price_df, corr_df, selected)
 
-    # ------------------------------------------------------------------ #
-    # Heatmap: ticker × sentiment
-    # ------------------------------------------------------------------ #
-    st.subheader("Mapa de Calor — Retorno Médio D+1 por Ticker e Sentimento")
-    heatmap = _create_correlation_heatmap(corr_df)
-    if heatmap:
-        st.plotly_chart(heatmap, use_container_width=True)
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
+    elif price_df.empty:
+        st.info(f"Sem dados de preço para {selected}.")
+
+    # --- Correlation metrics ------------------------------------------------
+    if not ticker_corr.empty:
+        st.subheader("📉 Correlação Notícias × Retorno de Preço")
+        horizon = st.selectbox(
+            "Horizonte", ["d1_var", "d0_var", "d5_var"],
+            format_func=lambda x: {"d0_var": "D0 (intraday)", "d1_var": "D+1", "d5_var": "D+5"}[x],
+            key="horizon_asset",
+        )
+        scatter = _scatter_sentiment_return(ticker_corr, horizon)
+        if scatter:
+            st.plotly_chart(scatter, use_container_width=True)
+
+        avg_d1 = ticker_corr["d1_var"].dropna().mean() * 100 if "d1_var" in ticker_corr.columns else None
+        avg_d5 = ticker_corr["d5_var"].dropna().mean() * 100 if "d5_var" in ticker_corr.columns else None
+        cc1, cc2 = st.columns(2)
+        if avg_d1 is not None:
+            cc1.metric("Retorno Médio D+1", f"{avg_d1:.2f}%")
+        if avg_d5 is not None:
+            cc2.metric("Retorno Médio D+5", f"{avg_d5:.2f}%")
+
+    # --- Related news -------------------------------------------------------
+    st.subheader(f"📰 Notícias sobre {selected}")
+    news_df = load_news(ticker=selected, limit=100)
+
+    if news_df.empty:
+        st.info("Nenhuma notícia encontrada para este ativo no período.")
     else:
-        st.info("Dados insuficientes para o mapa de calor.")
+        for _, row in news_df.head(30).iterrows():
+            pub = row["published_at"].strftime("%Y-%m-%d") if pd.notna(row["published_at"]) else "N/A"
+            sent = row.get("sentiment", "neutro") or "neutro"
+            color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
+            with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown(row.get("content") or "")
+                    st.markdown(f"[🔗 Leia mais]({row['url']})")
+                with col2:
+                    st.markdown(f"**Sentimento:** {sent}")
+                    conf = row.get("confidence", 0)
+                    st.markdown(f"**Confiança:** {conf:.2f}" if conf else "")
+                    segs = row.get("segments", [])
+                    if segs:
+                        st.markdown(f"**Segmentos:** {', '.join(segs)}")
 
-    # ------------------------------------------------------------------ #
-    # Price chart with news events
-    # ------------------------------------------------------------------ #
-    st.subheader("Preço do Ativo com Eventos de Notícias")
-    selected_ticker = st.selectbox("Selecione o ativo", options=tickers_available, key="ticker_select")
 
-    if selected_ticker:
-        price_df = _load_asset_prices(selected_ticker, db_path)
-        price_chart = _create_price_with_news_chart(price_df, corr_df, selected_ticker)
-        if price_chart:
-            st.plotly_chart(price_chart, use_container_width=True)
-        else:
-            st.info(f"Sem dados de preço para {selected_ticker}.")
+def _render_news_tab():
+    """📰 Full news feed with sentiment filters."""
+    st.header("📰 Notícias & Sentimento")
 
-    # ------------------------------------------------------------------ #
-    # Correlation table
-    # ------------------------------------------------------------------ #
-    st.subheader("Tabela de Correlações")
-    if corr_df.empty:
-        st.info("Nenhuma correlação calculada ainda.")
+    # --- Sidebar filters ----------------------------------------------------
+    st.sidebar.header("🔍 Filtros")
+
+    try:
+        conn = _conn()
+        sources = pd.read_sql_query("SELECT DISTINCT source FROM news ORDER BY source", conn)["source"].tolist()
+        conn.close()
+        sources.insert(0, "Todas")
+    except Exception:
+        sources = ["Todas"]
+    source_filter = st.sidebar.selectbox("Fonte", sources, key="news_source")
+
+    try:
+        conn = _conn()
+        seg_df = pd.read_sql_query(
+            "SELECT segments FROM news WHERE segments IS NOT NULL AND segments != '[]'", conn
+        )
+        conn.close()
+        all_segs: List[str] = []
+        for raw in seg_df["segments"]:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(parsed, list):
+                    all_segs.extend(parsed)
+            except Exception:
+                pass
+        unique_segs = ["Todos"] + sorted(set(all_segs))
+    except Exception:
+        unique_segs = ["Todos"]
+    segment_filter = st.sidebar.selectbox("Segmento", unique_segs, key="news_seg")
+
+    sentiment_filter = st.sidebar.selectbox(
+        "Sentimento", ["Todos", "positivo", "negativo", "neutro"], key="news_sent"
+    )
+
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        date_from = st.date_input("De", value=datetime.now() - timedelta(days=30), key="nf_from")
+    with col2:
+        date_to = st.date_input("Até", value=datetime.now(), key="nf_to")
+
+    # --- Load & metrics -----------------------------------------------------
+    df = load_news(
+        source=source_filter, sentiment=sentiment_filter,
+        date_from=str(date_from), date_to=str(date_to),
+        segment=segment_filter,
+    )
+
+    total = len(df)
+    has_sent = total > 0 and "sentiment" in df.columns and df["sentiment"].notna().any()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total", total)
+    if has_sent:
+        c2.metric("Positivas", int((df["sentiment"] == "positivo").sum()))
+        c3.metric("Negativas", int((df["sentiment"] == "negativo").sum()))
+        avg_conf = df["confidence"].mean() if "confidence" in df.columns else 0
+        c4.metric("Confiança Méd.", f"{avg_conf:.2f}")
     else:
-        display_corr = corr_df.copy()
-        for col in ['d0_var', 'd1_var', 'd5_var']:
-            if col in display_corr.columns:
-                display_corr[col] = (display_corr[col] * 100).round(2).astype(str) + '%'
-        if 'news_date' in display_corr.columns:
-            display_corr['news_date'] = display_corr['news_date'].dt.strftime('%Y-%m-%d')
-        st.dataframe(display_corr, use_container_width=True)
+        c2.metric("Positivas", "N/A")
+        c3.metric("Negativas", "N/A")
+        c4.metric("Confiança Méd.", "N/A")
+
+    # --- Charts -------------------------------------------------------------
+    if not df.empty and has_sent:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            counts = df["sentiment"].value_counts()
+            fig_pie = px.pie(
+                values=counts.values, names=counts.index,
+                title="Distribuição de Sentimentos",
+                color=counts.index, color_discrete_map=SENTIMENT_COLORS,
+            )
+            st.plotly_chart(fig_pie, use_container_width=True)
+        with col_b:
+            ot = _sentiment_over_time(df)
+            if ot:
+                st.plotly_chart(ot, use_container_width=True)
+
+    # --- News list ----------------------------------------------------------
+    st.divider()
+    if df.empty:
+        st.warning("Nenhuma notícia encontrada para os filtros aplicados.")
+        return
+
+    for _, row in df.head(50).iterrows():
+        pub = row["published_at"].strftime("%Y-%m-%d %H:%M") if pd.notna(row["published_at"]) else "N/A"
+        sent = row.get("sentiment", "neutro") or "neutro"
+        color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
+        with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(row.get("content") or "")
+                st.markdown(f"[🔗 Leia mais]({row['url']})")
+            with col2:
+                st.markdown(f"**Sentimento:** {sent}")
+                conf = row.get("confidence", 0)
+                if conf:
+                    st.markdown(f"**Confiança:** {conf:.2f}")
+                segs = row.get("segments", [])
+                if segs:
+                    st.markdown(f"**Segmentos:** {', '.join(segs)}")
+                tks = row.get("tickers", [])
+                if tks:
+                    st.markdown(f"**Tickers:** {', '.join(tks)}")
+                st.markdown(f"**Publicado:** {pub}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    st.set_page_config(
+        page_title="B3 Market Feeling Detector",
+        page_icon="📈",
+        layout="wide",
+    )
+
+    st.title("📈 B3 Market Feeling Detector")
+    st.caption("Análise de sentimento de notícias financeiras brasileiras com dados de mercado da B3.")
+
+    if not os.getenv("OPENAI_API_KEY"):
+        st.warning(
+            "⚠️ `OPENAI_API_KEY` não configurada — análise de sentimento desabilitada. "
+            "Configure o arquivo `.env` e reinicie."
+        )
+
+    tab_overview, tab_asset, tab_news = st.tabs([
+        "📊 Visão Geral",
+        "📈 Por Ativo",
+        "📰 Notícias",
+    ])
+
+    with tab_overview:
+        _render_overview_tab()
+
+    with tab_asset:
+        _render_asset_tab()
+
+    with tab_news:
+        _render_news_tab()
 
 
 if __name__ == "__main__":
