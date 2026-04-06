@@ -80,7 +80,9 @@ def load_news(
 ) -> pd.DataFrame:
     """Load enriched news from the database with optional filters."""
     cols = _news_columns(db_path)
-    has = lambda c: c in cols  # noqa: E731
+
+    def has(c: str) -> bool:
+        return c in cols
 
     select = (
         "id, title, content, source, published_at, url, collected_at, "
@@ -241,9 +243,10 @@ def get_segment_stats(df: pd.DataFrame) -> pd.DataFrame:
         .sort_values("total", ascending=False)
     )
     stats["confianca_media"] = stats["confianca_media"].round(3)
-    total = stats["total"].replace(0, 1)
-    stats["pct_positivo"] = (stats["positivo"] / total * 100).round(1)
-    stats["pct_negativo"] = (stats["negativo"] / total * 100).round(1)
+    # Use max(total, 1) to avoid division by zero for segments with no news
+    safe_total = stats["total"].clip(lower=1)
+    stats["pct_positivo"] = (stats["positivo"] / safe_total * 100).round(1)
+    stats["pct_negativo"] = (stats["negativo"] / safe_total * 100).round(1)
     return stats
 
 
