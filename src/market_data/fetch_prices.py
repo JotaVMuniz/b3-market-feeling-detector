@@ -97,6 +97,50 @@ def fetch_prices_for_tickers(
     return results
 
 
+def fetch_all_prices_range(
+    start_date: datetime.date,
+    end_date: Optional[datetime.date] = None,
+) -> List[Dict]:
+    """
+    Fetch all B3 prices for every calendar day in [start_date, end_date].
+
+    This function is intended for bulk historical backfills.  Unlike
+    :func:`fetch_prices_for_tickers`, it does **not** filter by ticker; it
+    returns every instrument traded on each day.
+
+    Weekends are skipped without an HTTP request.  Dates in the future are
+    silently ignored.
+
+    Args:
+        start_date: First date to fetch (inclusive).
+        end_date:   Last date to fetch (inclusive).  Defaults to today.
+
+    Returns:
+        List of price records for all tickers across the requested date range.
+    """
+    today = datetime.date.today()
+    if end_date is None:
+        end_date = today
+    end_date = min(end_date, today)
+
+    if start_date > end_date:
+        logger.warning(f"start_date {start_date} is after end_date {end_date} — nothing to fetch")
+        return []
+
+    results = []
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:  # Monday–Friday only
+            daily = fetch_daily_prices(current)
+            results.extend(daily)
+        current += datetime.timedelta(days=1)
+
+    logger.info(
+        f"fetch_all_prices_range({start_date} → {end_date}): {len(results)} records"
+    )
+    return results
+
+
 def next_trading_day(
     start: datetime.date,
     max_lookahead: int = 10,

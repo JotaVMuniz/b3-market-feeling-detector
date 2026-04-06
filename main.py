@@ -1,12 +1,13 @@
 """
 Main orchestration module for the financial news ingestion pipeline.
 
-The pipeline is split into four independent stages that can be run separately:
+The pipeline is split into five independent stages that can be run separately:
 
 - raw:       Fetch news from RSS feeds, clean and persist raw records.
 - trusted:   Enrich stored news with NLP/LLM sentiment analysis.
 - prices:    Fetch B3 market prices (fully independent of news data).
 - analytics: Compute news–price correlations from stored data.
+- backfill:  Download full B3 price history for a date range (all assets).
 
 Usage::
 
@@ -16,6 +17,8 @@ Usage::
     python main.py --stage prices
     python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
     python main.py --stage analytics
+    python main.py --stage backfill
+    python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
     python main.py --stage all          # full pipeline (default)
     python main.py --stage all --no-market-data
 """
@@ -47,7 +50,7 @@ from src.storage.save_raw import save_raw_news
 from src.storage.database import NewsDatabase
 from src.nlp.enrichment import enrich_batch
 from src.market_data.database_market import MarketDatabase
-from src.market_data.fetch_prices import fetch_prices_for_tickers
+from src.market_data.fetch_prices import fetch_prices_for_tickers, fetch_all_prices_range
 from src.market_data.fetch_companies import extract_companies_from_prices
 from src.market_data.correlation import compute_correlations
 
@@ -269,6 +272,53 @@ def run_prices(
     logger.info("Stage PRICES complete\n")
 
 
+def run_backfill(
+    start_date: datetime.date,
+    end_date: Optional[datetime.date] = None,
+) -> None:
+    """
+    Backfill stage – fetch all B3 prices for every trading day in a date range.
+
+    Downloads the complete daily price file from B3 for each calendar day
+    between *start_date* and *end_date* (weekends skipped automatically) and
+    upserts the results into the ``asset_prices`` and ``companies`` tables.
+
+    This stage is independent of the news pipeline and is designed to be run
+    once to seed the historical price database.
+
+    Args:
+        start_date: First trading date to backfill (inclusive).
+        end_date:   Last trading date to backfill (inclusive).
+                    Defaults to today when not provided.
+    """
+    if end_date is None:
+        end_date = datetime.date.today()
+
+    logger.info("=" * 60)
+    logger.info(
+        f"Stage: BACKFILL — fetching all B3 prices from {start_date} to {end_date}"
+    )
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+
+    price_records = fetch_all_prices_range(start_date=start_date, end_date=end_date)
+
+    if not price_records:
+        logger.warning("No price records returned — check date range and network access")
+        return
+
+    prices_written = market_db.upsert_prices(price_records)
+    logger.info(f"Stored {prices_written} price records in asset_prices")
+
+    companies = extract_companies_from_prices(price_records)
+    companies_written = market_db.upsert_companies(companies)
+    logger.info(f"Stored {companies_written} company records in companies")
+
+    logger.info("Stage BACKFILL complete\n")
+
+
 def run_analytics() -> None:
     """
     Stage 4 – Analytics: compute news–price correlations.
@@ -361,6 +411,8 @@ Examples:
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage analytics
+  python main.py --stage backfill
+  python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
   python main.py --stage all
   python main.py --stage all --no-market-data
 """,
@@ -368,7 +420,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'trusted', 'prices', 'analytics', 'all'],
+        choices=['raw', 'trusted', 'prices', 'analytics', 'backfill', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -399,6 +451,22 @@ Examples:
         metavar='YYYY-MM-DD',
         help='Single trading date for the prices stage (auto-detected if omitted).',
     )
+    parser.add_argument(
+        '--from',
+        dest='from_date',
+        type=str,
+        default='2025-01-01',
+        metavar='YYYY-MM-DD',
+        help='Start date for the backfill stage (default: 2025-01-01).',
+    )
+    parser.add_argument(
+        '--to',
+        dest='to_date',
+        type=str,
+        default=None,
+        metavar='YYYY-MM-DD',
+        help='End date for the backfill stage (default: today).',
+    )
 
     args = parser.parse_args()
 
@@ -410,6 +478,10 @@ Examples:
         [datetime.date.fromisoformat(args.date)]
         if args.date else None
     )
+    _from_date = datetime.date.fromisoformat(args.from_date)
+    _to_date = (
+        datetime.date.fromisoformat(args.to_date) if args.to_date else None
+    )
 
     if args.stage == 'raw':
         run_raw()
@@ -419,6 +491,8 @@ Examples:
         run_prices(tickers=_tickers_arg, dates=_dates_arg)
     elif args.stage == 'analytics':
         run_analytics()
+    elif args.stage == 'backfill':
+        run_backfill(start_date=_from_date, end_date=_to_date)
     else:  # 'all'
         run_pipeline(
             reprocess_existing=args.reprocess_existing,
