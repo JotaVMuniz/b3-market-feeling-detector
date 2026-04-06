@@ -232,11 +232,20 @@ def _run_market_data_step(db: NewsDatabase, recent_news: list) -> None:
             logger.info("No tickers or dates found in recent news — skipping market data step")
             return
 
-        # Also include D+1 to D+5 offset dates so correlations can be calculated
+        # Also include D+1 to D+5 offset dates so correlations can be calculated.
+        # Only keep dates up to today — B3 historical data is available for D-1
+        # and future dates have no file to download.
+        today = datetime.date.today()
         extended_dates = set(dates_seen)
         for base in list(dates_seen):
             for offset in range(1, 8):
                 extended_dates.add(base + datetime.timedelta(days=offset))
+
+        extended_dates = {d for d in extended_dates if d <= today}
+
+        if not extended_dates:
+            logger.info("All news dates are in the future — skipping market data step")
+            return
 
         price_records = fetch_prices_for_tickers(
             tickers=list(tickers_seen),

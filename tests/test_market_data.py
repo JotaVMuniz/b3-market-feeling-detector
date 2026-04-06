@@ -425,3 +425,65 @@ class TestExtractCompanies:
         assert petr["name"] == "PETROBRAS"
         assert petr["tipo_papel"] == "ON  NM"
         assert petr["isin"] == "BRPETRACNPR6"
+
+
+# ---------------------------------------------------------------------------
+# Tests: fetch_prices future-date guard
+# ---------------------------------------------------------------------------
+
+class TestFetchDailyPricesFutureDateGuard:
+    def test_future_date_returns_empty_without_network_call(self):
+        """fetch_daily_prices must return [] for future dates without attempting
+        any network request (no B3 import / instantiation should occur)."""
+        from src.market_data.fetch_prices import fetch_daily_prices
+
+        future = datetime.date.today() + datetime.timedelta(days=1)
+
+        with patch("src.market_data.fetch_prices.fetch_daily_prices") as _:
+            # Call the real function, but patch mercados so any accidental
+            # network call would raise to make the test fail
+            pass
+
+        # Test the real function directly – it must bail before importing B3
+        with patch.dict("sys.modules", {"mercados.b3": None}):
+            # Even if mercados is importable, future dates should short-circuit
+            # before the import statement inside the function
+            result = fetch_daily_prices(future)
+
+        assert result == []
+
+    def test_today_is_not_skipped(self):
+        """Today's date should not be filtered by the future-date guard
+        (even if the data isn't available yet, we attempt the request)."""
+        from src.market_data import fetch_prices as fp
+
+        today = datetime.date.today()
+        # Patch B3 to avoid real network calls
+        mock_b3_instance = MagicMock()
+        mock_b3_instance.negociacao_bolsa.return_value = iter([])
+        mock_b3_cls = MagicMock(return_value=mock_b3_instance)
+
+        with patch.dict("sys.modules", {"mercados.b3": MagicMock(B3=mock_b3_cls)}):
+            result = fp.fetch_daily_prices(today)
+
+        assert result == []  # Empty because we mocked an empty iterator
+        mock_b3_instance.negociacao_bolsa.assert_called_once_with("dia", today)
+
+    def test_fetch_prices_for_tickers_skips_future_dates(self):
+        """fetch_prices_for_tickers must not attempt fetches for future dates."""
+        from src.market_data import fetch_prices as fp
+
+        past_date = datetime.date(2024, 11, 15)
+        future_date = datetime.date.today() + datetime.timedelta(days=3)
+
+        fetched_dates = []
+
+        def mock_fetch_daily(date):
+            fetched_dates.append(date)
+            return []
+
+        with patch.object(fp, "fetch_daily_prices", side_effect=mock_fetch_daily):
+            fp.fetch_prices_for_tickers(["PETR4"], [past_date, future_date])
+
+        assert future_date not in fetched_dates
+        assert past_date in fetched_dates
