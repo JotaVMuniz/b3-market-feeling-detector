@@ -17,24 +17,17 @@ trading day found in the ``asset_prices`` table.
 import datetime
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_TICKER_PATTERN_RE = None
-
-
-def _compile_ticker_re():
-    global _TICKER_PATTERN_RE
-    if _TICKER_PATTERN_RE is None:
-        import re
-        _TICKER_PATTERN_RE = re.compile(r"^[A-Z]{4}\d{1,2}$")
-    return _TICKER_PATTERN_RE
+_TICKER_RE = re.compile(r"^[A-Z]{4}\d{1,2}$")
 
 
 def _is_valid_ticker(ticker: str) -> bool:
     """Return True if *ticker* matches the B3 format (4 letters + 1-2 digits)."""
-    return bool(_compile_ticker_re().match(ticker))
+    return bool(_TICKER_RE.match(ticker))
 
 
 def _parse_tickers(tickers_json: Optional[str]) -> List[str]:

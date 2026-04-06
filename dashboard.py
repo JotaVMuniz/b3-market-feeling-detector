@@ -125,7 +125,6 @@ def load_news_data(
         df['collected_at'] = pd.to_datetime(df['collected_at'], errors='coerce')
         
         # Parse JSON fields
-        import json
         if 'segments' in df.columns:
             df['segments'] = df['segments'].apply(lambda x: json.loads(x) if isinstance(x, str) and x else [])
         if 'tickers' in df.columns:
@@ -530,6 +529,7 @@ def _load_correlations(db_path: str = "data/news.db", limit: int = 500) -> pd.Da
         df['news_date'] = pd.to_datetime(df['news_date'], errors='coerce')
         return df
     except Exception as e:
+        st.error(f"Erro ao carregar correlações: {e}")
         return pd.DataFrame()
 
 
@@ -547,7 +547,8 @@ def _load_asset_prices(ticker: str, db_path: str = "data/news.db") -> pd.DataFra
         conn.close()
         df['date'] = pd.to_datetime(df['date'], errors='coerce')
         return df
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao carregar preços para {ticker}: {e}")
         return pd.DataFrame()
 
 
@@ -565,7 +566,8 @@ def _load_tickers_in_db(db_path: str = "data/news.db") -> List[str]:
         )
         conn.close()
         return df['ticker'].tolist()
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao carregar lista de ativos: {e}")
         return []
 
 
@@ -586,36 +588,37 @@ def _create_price_with_news_chart(price_df: pd.DataFrame, news_df: pd.DataFrame,
 
     if not news_df.empty:
         ticker_news = news_df[news_df['ticker'] == ticker].copy()
+
+        # Build a date → close lookup for annotating events on the price line
+        price_lookup = (
+            price_df.set_index(price_df['date'].dt.normalize())['close'].to_dict()
+        )
+
         for sentiment, color, symbol in [
             ('positivo', '#2ca02c', 'triangle-up'),
             ('negativo', '#d62728', 'triangle-down'),
             ('neutro', '#ff7f0e', 'circle'),
         ]:
-            subset = ticker_news[ticker_news['sentiment'] == sentiment]
+            subset = ticker_news[ticker_news['sentiment'] == sentiment].copy()
             if subset.empty:
                 continue
-            # Merge news dates with close prices on that day
-            merged = subset.merge(
-                price_df[['date', 'close']].rename(columns={'date': 'news_date_dt'}),
-                left_on=subset['news_date'].dt.normalize(),
-                right_on=price_df['date'].dt.normalize(),
-                how='inner',
-            ) if not price_df.empty else pd.DataFrame()
 
-            y_vals = merged['close'] if not merged.empty else None
-            x_vals = subset['news_date'] if merged.empty else merged['news_date']
+            subset['_date_key'] = subset['news_date'].dt.normalize()
+            subset['_y'] = subset['_date_key'].map(price_lookup)
 
-            if y_vals is None or len(x_vals) == 0:
+            # Keep only rows where a matching price exists
+            subset = subset.dropna(subset=['_y'])
+            if subset.empty:
                 continue
 
             fig.add_trace(go.Scatter(
-                x=x_vals,
-                y=y_vals if y_vals is not None else [None] * len(x_vals),
+                x=subset['news_date'],
+                y=subset['_y'],
                 mode='markers',
                 name=f'Notícia {sentiment}',
                 marker=dict(color=color, size=10, symbol=symbol),
-                text=subset['title'].values if len(subset) == len(x_vals) else None,
-                hovertemplate='%{text}<extra></extra>' if len(subset) == len(x_vals) else None,
+                text=subset['title'],
+                hovertemplate='%{text}<extra></extra>',
             ))
 
     fig.update_layout(
