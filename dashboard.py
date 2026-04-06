@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import json
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -612,6 +613,7 @@ def _render_news_tab():
     if segment_stats.empty:
         st.info("Nenhum dado de segmento disponível para as notícias filtradas.")
     else:
+        # Summary cards
         num_segments = len(segment_stats)
         top_segment = segment_stats.iloc[0]['segment']
         avg_conf_seg = segment_stats['confianca_media'].mean()
@@ -627,6 +629,7 @@ def _render_news_tab():
             else:
                 st.metric("Confiança Média (segmentos)", "N/A")
 
+        # Charts row
         seg_col1, seg_col2 = st.columns(2)
 
         with seg_col1:
@@ -641,10 +644,12 @@ def _render_news_tab():
             elif not stats['has_sentiment']:
                 st.info("Mapa de calor disponível após análise de sentimento.")
 
+        # Temporal series
         time_seg_chart = create_segment_sentiment_over_time(df, segment=segment_filter)
         if time_seg_chart:
             st.plotly_chart(time_seg_chart, use_container_width=True)
 
+        # Aggregated statistics table
         st.subheader("📋 Estatísticas por Segmento")
         display_stats = segment_stats.rename(columns={
             'segment': 'Segmento',
