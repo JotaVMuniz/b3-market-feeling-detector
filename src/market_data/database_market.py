@@ -72,6 +72,35 @@ CREATE INDEX IF NOT EXISTS idx_correlation_news_id
 ON news_price_correlation(news_id)
 """
 
+_CREATE_SENTIMENT_INDICATORS = """
+CREATE TABLE IF NOT EXISTS sentiment_indicators (
+    date      TEXT NOT NULL,
+    indicator TEXT NOT NULL,
+    value     REAL,
+    PRIMARY KEY (date, indicator)
+)
+"""
+
+_CREATE_COMPOSITE_SENTIMENT_INDEX = """
+CREATE TABLE IF NOT EXISTS composite_sentiment_index (
+    date               TEXT PRIMARY KEY,
+    score              REAL,
+    label              TEXT,
+    turnover_score     REAL,
+    trin_score         REAL,
+    put_call_score     REAL,
+    pct_advancing_score REAL,
+    cdi_score          REAL,
+    consumer_confidence_score REAL,
+    cds_score          REAL
+)
+"""
+
+_CREATE_IDX_SENTIMENT_INDICATORS_DATE = """
+CREATE INDEX IF NOT EXISTS idx_sentiment_indicators_date
+ON sentiment_indicators(date)
+"""
+
 
 class MarketDatabase:
     """Manages market-data tables inside the shared news.db database."""
@@ -108,6 +137,9 @@ class MarketDatabase:
                     _CREATE_IDX_ASSET_PRICES_TICKER,
                     _CREATE_IDX_CORRELATION_TICKER,
                     _CREATE_IDX_CORRELATION_NEWS,
+                    _CREATE_SENTIMENT_INDICATORS,
+                    _CREATE_COMPOSITE_SENTIMENT_INDEX,
+                    _CREATE_IDX_SENTIMENT_INDICATORS_DATE,
                 ):
                     cursor.execute(stmt)
             logger.info("Market-data tables initialised")
@@ -394,4 +426,170 @@ class MarketDatabase:
                 return [dict(row) for row in cursor.fetchall()]
         except Exception as exc:
             logger.error(f"Error fetching correlations with news: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # sentiment_indicators
+    # ------------------------------------------------------------------
+
+    def upsert_indicators(self, records: List[Dict]) -> int:
+        """
+        Insert or replace rows in ``sentiment_indicators``.
+
+        Args:
+            records: Dicts with keys ``date``, ``indicator``, ``value``.
+
+        Returns:
+            Number of rows written.
+        """
+        if not records:
+            return 0
+
+        written = 0
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for rec in records:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO sentiment_indicators
+                            (date, indicator, value)
+                        VALUES (?, ?, ?)
+                        """,
+                        (rec.get("date"), rec.get("indicator"), rec.get("value")),
+                    )
+                    written += 1
+            logger.info(f"Upserted {written} sentiment indicator records")
+        except Exception as exc:
+            logger.error(f"Error upserting sentiment indicators: {exc}")
+        return written
+
+    def get_indicators(
+        self,
+        indicator: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> List[Dict]:
+        """
+        Query rows from ``sentiment_indicators``.
+
+        Args:
+            indicator: Filter to a specific indicator name (optional).
+            date_from: ISO date string lower bound (inclusive, optional).
+            date_to:   ISO date string upper bound (inclusive, optional).
+
+        Returns:
+            List of indicator dicts ordered by date ascending.
+        """
+        query = "SELECT * FROM sentiment_indicators WHERE 1=1"
+        params: List = []
+
+        if indicator:
+            query += " AND indicator = ?"
+            params.append(indicator)
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY date ASC, indicator ASC"
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as exc:
+            logger.error(f"Error fetching sentiment indicators: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # composite_sentiment_index
+    # ------------------------------------------------------------------
+
+    def upsert_composite_index(self, records: List[Dict]) -> int:
+        """
+        Insert or replace rows in ``composite_sentiment_index``.
+
+        Args:
+            records: Dicts with keys ``date``, ``score``, ``label``, and
+                optional per-indicator score keys.
+
+        Returns:
+            Number of rows written.
+        """
+        if not records:
+            return 0
+
+        written = 0
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for rec in records:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO composite_sentiment_index
+                            (date, score, label, turnover_score, trin_score,
+                             put_call_score, pct_advancing_score, cdi_score,
+                             consumer_confidence_score, cds_score)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            rec.get("date"),
+                            rec.get("score"),
+                            rec.get("label"),
+                            rec.get("turnover_score"),
+                            rec.get("trin_score"),
+                            rec.get("put_call_score"),
+                            rec.get("pct_advancing_score"),
+                            rec.get("cdi_score"),
+                            rec.get("consumer_confidence_score"),
+                            rec.get("cds_score"),
+                        ),
+                    )
+                    written += 1
+            logger.info(f"Upserted {written} composite index records")
+        except Exception as exc:
+            logger.error(f"Error upserting composite index: {exc}")
+        return written
+
+    def get_composite_index(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        limit: int = 365,
+    ) -> List[Dict]:
+        """
+        Query rows from ``composite_sentiment_index``.
+
+        Args:
+            date_from: ISO date lower bound (inclusive, optional).
+            date_to:   ISO date upper bound (inclusive, optional).
+            limit:     Maximum number of rows to return.
+
+        Returns:
+            List of composite index dicts ordered by date ascending.
+        """
+        query = "SELECT * FROM composite_sentiment_index WHERE 1=1"
+        params: List = []
+
+        if date_from:
+            query += " AND date >= ?"
+            params.append(date_from)
+        if date_to:
+            query += " AND date <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY date ASC LIMIT ?"
+        params.append(limit)
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as exc:
+            logger.error(f"Error fetching composite index: {exc}")
             return []

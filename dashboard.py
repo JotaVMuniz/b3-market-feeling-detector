@@ -206,6 +206,72 @@ def load_correlations(limit: int = 2000, db_path: str = DB_PATH) -> pd.DataFrame
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_sentiment_indicators(
+    indicator: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> pd.DataFrame:
+    """Load sentiment indicator rows from the database."""
+    if not _table_exists("sentiment_indicators", db_path):
+        return pd.DataFrame()
+
+    query = "SELECT * FROM sentiment_indicators WHERE 1=1"
+    params: list = []
+    if indicator:
+        query += " AND indicator = ?"
+        params.append(indicator)
+    if date_from:
+        query += " AND date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND date <= ?"
+        params.append(date_to)
+    query += " ORDER BY date ASC"
+
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar indicadores: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def load_composite_index(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> pd.DataFrame:
+    """Load composite sentiment index rows from the database."""
+    if not _table_exists("composite_sentiment_index", db_path):
+        return pd.DataFrame()
+
+    query = "SELECT * FROM composite_sentiment_index WHERE 1=1"
+    params: list = []
+    if date_from:
+        query += " AND date >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND date <= ?"
+        params.append(date_to)
+    query += " ORDER BY date ASC"
+
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar índice composto: {e}")
+        return pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------
 # Segment helpers
 # ---------------------------------------------------------------------------
@@ -776,8 +842,9 @@ def _render_news_tab():
     """📰 Full news feed with sentiment filters."""
     st.header("📰 Notícias & Sentimento")
 
-    # --- Sidebar filters ----------------------------------------------------
-    st.sidebar.header("🔍 Filtros")
+    # --- Inline filters (previously in sidebar) ---------------------------------
+    st.subheader("🔍 Filtros")
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     try:
         conn = _conn()
@@ -786,7 +853,8 @@ def _render_news_tab():
         sources.insert(0, "Todas")
     except Exception:
         sources = ["Todas"]
-    source_filter = st.sidebar.selectbox("Fonte", sources, key="news_source")
+    with filter_col1:
+        source_filter = st.selectbox("Fonte", sources, key="news_source")
 
     try:
         conn = _conn()
@@ -805,17 +873,21 @@ def _render_news_tab():
         unique_segs = ["Todos"] + sorted(set(all_segs))
     except Exception:
         unique_segs = ["Todos"]
-    segment_filter = st.sidebar.selectbox("Segmento", unique_segs, key="news_seg")
+    with filter_col2:
+        segment_filter = st.selectbox("Segmento", unique_segs, key="news_seg")
 
-    sentiment_filter = st.sidebar.selectbox(
-        "Sentimento", ["Todos", "positivo", "negativo", "neutro"], key="news_sent"
-    )
+    with filter_col3:
+        sentiment_filter = st.selectbox(
+            "Sentimento", ["Todos", "positivo", "negativo", "neutro"], key="news_sent"
+        )
 
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
         date_from = st.date_input("De", value=datetime.now() - timedelta(days=30), key="nf_from")
-    with col2:
+    with date_col2:
         date_to = st.date_input("Até", value=datetime.now(), key="nf_to")
+
+    st.divider()
 
     # --- Load & metrics -----------------------------------------------------
     df = load_news(
@@ -888,6 +960,220 @@ def _render_news_tab():
 # Entry point
 # ---------------------------------------------------------------------------
 
+_LABEL_COLORS = {
+    "Medo Extremo":     "#d62728",
+    "Medo":             "#ff7f0e",
+    "Neutro":           "#aec7e8",
+    "Ganância":         "#2ca02c",
+    "Ganância Extrema": "#1a7f2e",
+}
+
+
+def _gauge_chart(score: float, label: str):
+    """Render a gauge chart for the composite sentiment score."""
+    color = _LABEL_COLORS.get(label, "#aec7e8")
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=score,
+        delta={"reference": 50},
+        gauge={
+            "axis": {"range": [0, 100]},
+            "bar": {"color": color},
+            "steps": [
+                {"range": [0, 20],  "color": "#f8d7da"},
+                {"range": [20, 40], "color": "#ffe8cc"},
+                {"range": [40, 60], "color": "#e8f4fd"},
+                {"range": [60, 80], "color": "#d4edda"},
+                {"range": [80, 100],"color": "#b8dfc5"},
+            ],
+            "threshold": {
+                "line": {"color": "black", "width": 4},
+                "thickness": 0.8,
+                "value": score,
+            },
+        },
+        title={"text": f"Índice de Sentimento<br><b>{label}</b>"},
+        number={"suffix": " / 100"},
+    ))
+    fig.update_layout(height=300, margin=dict(t=60, b=20, l=20, r=20))
+    return fig
+
+
+def _render_indicators_tab():
+    """🧭 Sentiment indicators and composite Fear & Greed index."""
+    st.header("🧭 Indicadores de Sentimento do Mercado")
+
+    col_date1, col_date2 = st.columns(2)
+    with col_date1:
+        date_from = st.date_input(
+            "De", value=datetime.now() - timedelta(days=90), key="ind_from"
+        )
+    with col_date2:
+        date_to = st.date_input("Até", value=datetime.now(), key="ind_to")
+
+    date_from_str = str(date_from)
+    date_to_str = str(date_to)
+
+    # Load all composite index data (for the current-score gauge)
+    composite_all_df = load_composite_index()
+    # Load filtered composite index data (for historical charts)
+    composite_df = load_composite_index(date_from=date_from_str, date_to=date_to_str)
+    indicators_df = load_sentiment_indicators(date_from=date_from_str, date_to=date_to_str)
+
+    if composite_all_df.empty and indicators_df.empty:
+        st.info(
+            "🔄 Nenhum dado de indicadores disponível ainda. Execute o pipeline:\n"
+            "```\npython main.py --stage indicators\n```\n\n"
+            "Para carregar histórico completo (≈1 ano necessário para o índice composto):\n"
+            "```\npython main.py --stage indicators --from 2024-01-01\n```"
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # Composite index gauge + time-series
+    # ------------------------------------------------------------------
+    if not composite_all_df.empty:
+        # Gauge always reflects the most recent available score
+        latest = composite_all_df.iloc[-1]
+        score = latest.get("score", 50.0)
+        label = latest.get("label", "Neutro")
+
+        col_gauge, col_info = st.columns([1, 2])
+        with col_gauge:
+            st.plotly_chart(_gauge_chart(score, label), use_container_width=True)
+        with col_info:
+            st.subheader("Score Atual")
+            st.metric("Índice Composto", f"{score:.1f} / 100", delta=label)
+            st.caption(
+                f"Última atualização: **{latest['date'].strftime('%d/%m/%Y') if pd.notna(latest['date']) else 'N/A'}**"
+            )
+            st.markdown("""
+**Escala:**
+- 🔴 **0–20** — Medo Extremo
+- 🟠 **21–40** — Medo
+- 🔵 **41–60** — Neutro
+- 🟢 **61–80** — Ganância
+- 🌿 **81–100** — Ganância Extrema
+""")
+
+        st.divider()
+
+        # Time-series of composite index — uses date-filtered data
+        chart_df = composite_df if not composite_df.empty else composite_all_df
+        fig_idx = px.line(
+            chart_df, x="date", y="score",
+            title="Evolução do Índice de Sentimento (0 = Medo Extremo | 100 = Ganancia Extrema)",
+            labels={"date": "Data", "score": "Score"},
+            color_discrete_sequence=["#1f77b4"],
+        )
+        fig_idx.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="Neutro")
+        fig_idx.add_hrect(y0=0,  y1=20,  fillcolor="#f8d7da", opacity=0.15, line_width=0)
+        fig_idx.add_hrect(y0=20, y1=40,  fillcolor="#ffe8cc", opacity=0.15, line_width=0)
+        fig_idx.add_hrect(y0=60, y1=80,  fillcolor="#d4edda", opacity=0.15, line_width=0)
+        fig_idx.add_hrect(y0=80, y1=100, fillcolor="#b8dfc5", opacity=0.15, line_width=0)
+        st.plotly_chart(fig_idx, use_container_width=True)
+
+        # Component scores — uses date-filtered data
+        score_cols = [c for c in chart_df.columns if c.endswith("_score") and chart_df[c].notna().any()]
+        if score_cols:
+            st.subheader("📊 Componentes do Índice")
+            fig_comp = go.Figure()
+            labels_map = {
+                "turnover_score": "Turnover",
+                "trin_score": "TRIN (Arms)",
+                "put_call_score": "Put/Call",
+                "pct_advancing_score": "% Ações em Alta",
+                "cdi_score": "CDI",
+                "consumer_confidence_score": "Conf. Consumidor",
+                "cds_score": "CDS Brasil",
+            }
+            for col in score_cols:
+                name = labels_map.get(col, col)
+                fig_comp.add_trace(go.Scatter(
+                    x=chart_df["date"], y=chart_df[col],
+                    mode="lines", name=name,
+                ))
+            fig_comp.add_hline(y=50, line_dash="dash", line_color="gray")
+            fig_comp.update_layout(
+                title="Scores por Componente (0–100)",
+                xaxis_title="Data", yaxis_title="Score",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+        st.divider()
+
+    # ------------------------------------------------------------------
+    # Raw indicators
+    # ------------------------------------------------------------------
+    if not indicators_df.empty:
+        st.subheader("📈 Indicadores Brutos")
+
+        indicator_labels = {
+            "turnover":             "Turnover (Volume Total)",
+            "trin":                 "TRIN – Arms Index",
+            "put_call_ratio":       "Proporção Put/Call (PCR)",
+            "pct_advancing":        "% Ações em Alta",
+            "cdi_rate":             "Taxa CDI",
+            "consumer_confidence":  "Confiança do Consumidor (ICC)",
+            "cds_brasil_5y":        "CDS Brasil 5Y",
+        }
+
+        all_indicators = sorted(indicators_df["indicator"].unique())
+        selected_inds = st.multiselect(
+            "Indicadores",
+            options=all_indicators,
+            default=all_indicators[:4],
+            format_func=lambda x: indicator_labels.get(x, x),
+        )
+
+        for ind in selected_inds:
+            sub = indicators_df[indicators_df["indicator"] == ind].copy()
+            if sub.empty:
+                continue
+            label = indicator_labels.get(ind, ind)
+            fig_raw = px.line(
+                sub, x="date", y="value",
+                title=label,
+                labels={"date": "Data", "value": label},
+            )
+            st.plotly_chart(fig_raw, use_container_width=True)
+
+        # Raw data table
+        with st.expander("📋 Dados brutos", expanded=False):
+            pivot = indicators_df.pivot_table(
+                index="date", columns="indicator", values="value"
+            ).reset_index()
+            pivot.columns.name = None
+            pivot = pivot.rename(columns=indicator_labels)
+            st.dataframe(pivot, use_container_width=True)
+
+    st.divider()
+    st.subheader("ℹ️ Sobre os Indicadores")
+    st.markdown("""
+Os indicadores são calculados a partir dos dados públicos disponíveis na biblioteca
+[mercados](https://github.com/PythonicCafe/mercados):
+
+| Indicador | Fonte | Interpretação |
+|-----------|-------|---------------|
+| **Turnover** | B3 – `negociacao_bolsa` | Volume total negociado. Alto volume sugere otimismo. |
+| **TRIN (Arms Index)** | B3 – `negociacao_bolsa` | >1 = mais volume em ações caindo (pessimismo). |
+| **Put/Call (PCR)** | B3 – `negociacao_bolsa` (opções) | >1 = mais opções de venda que de compra (pessimismo). |
+| **% Ações em Alta** | B3 – `negociacao_bolsa` | Percentual de ações cujo fechamento > abertura. |
+| **Taxa CDI** | BCB – SGS | Proxy para amplitude do DI. Taxas altas = restrição. |
+| **Confiança Consumidor** | BCB – SGS (ICC, cód. 4393) | Índice FGV/Fecomercio. Maior = otimismo. |
+| **CDS Brasil 5Y** | BCB – SGS (cód. 28229) | Risco-país. Maior = mais medo de calote. |
+
+> **Nota metodológica:** o índice composto utiliza o método de *percentile rank* em janela
+> móvel de 252 pregões (≈1 ano) para normalizar cada indicador a uma escala 0–100. São
+> necessários pelo menos 10 observações históricas por componente para que ele entre no cálculo.
+""")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def main():
     st.set_page_config(
         page_title="B3 Market Feeling Detector",
@@ -904,9 +1190,10 @@ def main():
             "Configure o arquivo `.env` e reinicie."
         )
 
-    tab_overview, tab_asset, tab_news = st.tabs([
+    tab_overview, tab_asset, tab_indicators, tab_news = st.tabs([
         "📊 Visão Geral",
         "📈 Por Ativo",
+        "🧭 Indicadores",
         "📰 Notícias",
     ])
 
@@ -915,6 +1202,9 @@ def main():
 
     with tab_asset:
         _render_asset_tab()
+
+    with tab_indicators:
+        _render_indicators_tab()
 
     with tab_news:
         _render_news_tab()
