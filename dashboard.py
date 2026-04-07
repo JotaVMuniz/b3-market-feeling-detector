@@ -157,6 +157,7 @@ def load_asset_prices(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
 def load_tickers(db_path: str = DB_PATH) -> List[str]:
     if not _table_exists("asset_prices", db_path):
         return []
@@ -171,6 +172,7 @@ def load_tickers(db_path: str = DB_PATH) -> List[str]:
         return []
 
 
+@st.cache_data(ttl=300)
 def load_companies(db_path: str = DB_PATH) -> pd.DataFrame:
     if not _table_exists("companies", db_path):
         return pd.DataFrame()
@@ -288,6 +290,85 @@ def get_segment_price_stats(corr_df: pd.DataFrame, news_df: pd.DataFrame) -> pd.
     for col in ("avg_d0", "avg_d1", "avg_d5"):
         stats[col] = stats[col].round(2)
     return stats.sort_values("n_pares", ascending=False)
+
+
+# ---------------------------------------------------------------------------
+# Sentiment helpers
+# ---------------------------------------------------------------------------
+
+def compute_asset_sentiment(news_df: pd.DataFrame) -> Dict:
+    """Compute a weighted sentiment score from a news dataframe.
+
+    Returns a dict with keys:
+    - label: "positivo" | "negativo" | "neutro"
+    - score: float in [-1, 1]
+    - count: int (total news items)
+    - pos: int (positive count)
+    - neg: int (negative count)
+    - neu: int (neutral count)
+    """
+    empty = {"label": "neutro", "score": 0.0, "count": 0, "pos": 0, "neg": 0, "neu": 0}
+    if news_df.empty or "sentiment" not in news_df.columns:
+        return empty
+
+    sentiment_map = {"positivo": 1.0, "negativo": -1.0, "neutro": 0.0}
+    scores: List[float] = []
+    for _, row in news_df.iterrows():
+        sent = (row.get("sentiment") or "neutro").lower()
+        conf = float(row.get("confidence") or 0.5)
+        scores.append(sentiment_map.get(sent, 0.0) * conf)
+
+    if not scores:
+        return empty
+
+    avg_score = sum(scores) / len(scores)
+    pos = int((news_df["sentiment"] == "positivo").sum())
+    neg = int((news_df["sentiment"] == "negativo").sum())
+    neu = int((news_df["sentiment"] == "neutro").sum())
+
+    if avg_score > 0.1:
+        label = "positivo"
+    elif avg_score < -0.1:
+        label = "negativo"
+    else:
+        label = "neutro"
+
+    return {"label": label, "score": avg_score, "count": len(news_df), "pos": pos, "neg": neg, "neu": neu}
+
+
+def _render_sentiment_indicator(sentiment_data: Dict) -> None:
+    """Render a visual sentiment indicator for an asset."""
+    label = sentiment_data["label"]
+    score = sentiment_data["score"]
+    count = sentiment_data["count"]
+
+    emoji_map = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}
+    label_pt = {"positivo": "Positivo", "negativo": "Negativo", "neutro": "Neutro"}
+    emoji = emoji_map.get(label, "⚪")
+
+    st.markdown(
+        f"""
+        <div style="
+            background: {'#d4edda' if label == 'positivo' else '#f8d7da' if label == 'negativo' else '#fff3cd'};
+            border-radius: 12px;
+            padding: 16px 24px;
+            display: inline-block;
+            margin-bottom: 8px;
+        ">
+            <span style="font-size: 2rem;">{emoji}</span>
+            <span style="font-size: 1.4rem; font-weight: bold; margin-left: 10px;">
+                Sentimento Geral: {label_pt[label]}
+            </span>
+            <br/>
+            <span style="color: #555; font-size: 0.9rem;">
+                Score: {score:+.2f} &nbsp;|&nbsp;
+                Baseado em {count} {'notícia' if count == 1 else 'notícias'}
+                &nbsp;({sentiment_data['pos']} positivas, {sentiment_data['neg']} negativas, {sentiment_data['neu']} neutras)
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -521,19 +602,58 @@ def _render_asset_tab():
         )
         return
 
-    # Sidebar selector
-    selected = st.selectbox("Selecione o ativo", options=tickers, key="asset_select")
-    if not selected:
+    # Build ticker → company name lookup for enriched selectbox options
+    ticker_to_name: Dict[str, str] = {}
+    if not companies_df.empty and "ticker" in companies_df.columns and "name" in companies_df.columns:
+        ticker_to_name = dict(zip(companies_df["ticker"], companies_df["name"]))
+
+    options = [
+        f"{t} — {ticker_to_name[t]}" if ticker_to_name.get(t) else t
+        for t in tickers
+    ]
+
+    selected_option = st.selectbox(
+        "🔍 Selecione o ativo (ticker ou nome da empresa)",
+        options=options,
+        key="asset_select",
+    )
+    if not selected_option:
         return
 
-    # Company info
-    if not companies_df.empty:
-        row = companies_df[companies_df["ticker"] == selected]
-        if not row.empty:
-            info = row.iloc[0]
-            st.caption(f"**{info.get('name', selected)}** — {info.get('tipo_papel', '')}")
+    # Extract the ticker from the combined label
+    selected = selected_option.split(" — ")[0].strip()
+
+    # Company info caption
+    company_info = ticker_to_name.get(selected, "")
+    if not company_info and not companies_df.empty:
+        row_info = companies_df[companies_df["ticker"] == selected]
+        if not row_info.empty:
+            info = row_info.iloc[0]
+            company_info = info.get("name", "")
+            tipo = info.get("tipo_papel", "")
+            if tipo:
+                st.caption(f"**{company_info}** — {tipo}")
+    elif company_info:
+        tipo = ""
+        if not companies_df.empty:
+            row_info = companies_df[companies_df["ticker"] == selected]
+            if not row_info.empty:
+                tipo = row_info.iloc[0].get("tipo_papel", "")
+        caption = f"**{company_info}**" + (f" — {tipo}" if tipo else "")
+        st.caption(caption)
 
     price_df = load_asset_prices(selected)
+
+    # --- Related news (load early to compute sentiment indicator) -----------
+    news_df = load_news(ticker=selected, limit=100)
+
+    # Detect the segments associated with this ticker from its news
+    ticker_segments: List[str] = []
+    if not news_df.empty and "segments" in news_df.columns:
+        for segs in news_df["segments"]:
+            if isinstance(segs, list):
+                ticker_segments.extend(segs)
+    ticker_segments = sorted(set(ticker_segments))
 
     # --- KPIs ---------------------------------------------------------------
     ticker_corr = corr_df[corr_df["ticker"] == selected] if not corr_df.empty else pd.DataFrame()
@@ -553,6 +673,16 @@ def _render_asset_tab():
 
     news_count = len(ticker_corr) if not ticker_corr.empty else 0
     c4.metric("Notícias Relacionadas", news_count)
+
+    # --- Sentiment indicator ------------------------------------------------
+    st.subheader("🎯 Sentimento Geral do Ativo")
+    sentiment_data = compute_asset_sentiment(news_df)
+    if sentiment_data["count"] > 0:
+        _render_sentiment_indicator(sentiment_data)
+    else:
+        st.info("Sem notícias suficientes para calcular o sentimento do ativo.")
+
+    st.divider()
 
     # --- Price chart --------------------------------------------------------
     chart_type = st.radio(
@@ -589,14 +719,11 @@ def _render_asset_tab():
         if avg_d5 is not None:
             cc2.metric("Retorno Médio D+5", f"{avg_d5:.2f}%")
 
-    # --- Related news -------------------------------------------------------
+    # --- Direct ticker news -------------------------------------------------
     st.subheader(f"📰 Notícias sobre {selected}")
-    news_df = load_news(ticker=selected, limit=100)
 
-    if news_df.empty:
-        st.info("Nenhuma notícia encontrada para este ativo no período.")
-    else:
-        for _, row in news_df.head(30).iterrows():
+    def _render_news_rows(df: pd.DataFrame, max_rows: int = 30) -> None:
+        for _, row in df.head(max_rows).iterrows():
             pub = row["published_at"].strftime("%Y-%m-%d") if pd.notna(row["published_at"]) else "N/A"
             sent = row.get("sentiment", "neutro") or "neutro"
             color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
@@ -608,10 +735,42 @@ def _render_asset_tab():
                 with col2:
                     st.markdown(f"**Sentimento:** {sent}")
                     conf = row.get("confidence", 0)
-                    st.markdown(f"**Confiança:** {conf:.2f}" if conf else "")
+                    if conf:
+                        st.markdown(f"**Confiança:** {conf:.2f}")
                     segs = row.get("segments", [])
                     if segs:
                         st.markdown(f"**Segmentos:** {', '.join(segs)}")
+
+    if news_df.empty:
+        st.info("Nenhuma notícia encontrada para este ativo no período.")
+    else:
+        _render_news_rows(news_df)
+
+    # --- Segment news -------------------------------------------------------
+    if ticker_segments:
+        st.divider()
+        st.subheader(f"🏭 Notícias do Segmento: {', '.join(ticker_segments)}")
+
+        # Collect the IDs of news already shown to avoid duplication
+        shown_ids = set(news_df["id"].tolist()) if not news_df.empty else set()
+
+        for segment in ticker_segments:
+            seg_df = load_news(segment=segment, limit=50)
+            # Exclude already shown news
+            if not seg_df.empty and shown_ids:
+                seg_df = seg_df[~seg_df["id"].isin(shown_ids)]
+
+            if seg_df.empty:
+                continue
+
+            with st.expander(f"📂 Segmento: {segment} ({len(seg_df)} notícias)", expanded=False):
+                seg_sentiment = compute_asset_sentiment(seg_df)
+                if seg_sentiment["count"] > 0:
+                    _render_sentiment_indicator(seg_sentiment)
+                _render_news_rows(seg_df, max_rows=20)
+    else:
+        if not news_df.empty:
+            st.caption("ℹ️ Nenhum segmento identificado para este ativo com base nas notícias disponíveis.")
 
 
 def _render_news_tab():
