@@ -41,6 +41,7 @@ def fetch_tweets(
     query: str = FINANCIAL_QUERY,
     max_results: int = 100,
     bearer_token: Optional[str] = None,
+    start_time: Optional[str] = None,
 ) -> List[Dict]:
     """
     Fetch recent tweets about the Brazilian financial market from the X API v2.
@@ -56,6 +57,10 @@ def fetch_tweets(
                      range 10–100 for the free-tier plan.
         bearer_token: Bearer token.  If *None*, reads from the
                       ``TWITTER_BEARER_TOKEN`` environment variable.
+        start_time: RFC 3339 / ISO 8601 datetime string.  When provided, only
+                    tweets created **after** this timestamp are returned.  Use
+                    the ``published_at`` of the most recently stored tweet as a
+                    checkpoint to avoid re-fetching already-ingested posts.
 
     Returns:
         List of tweet dictionaries normalised to the same schema used by the
@@ -76,6 +81,9 @@ def fetch_tweets(
         "max_results": max(10, min(int(max_results), 100)),
         "tweet.fields": "created_at,author_id,text",
     }
+    if start_time:
+        params["start_time"] = start_time
+        logger.info("Tweet checkpoint: fetching posts after %s", start_time)
 
     try:
         response = requests.get(

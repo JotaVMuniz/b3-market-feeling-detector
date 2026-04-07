@@ -487,3 +487,51 @@ class TestFetchDailyPricesFutureDateGuard:
 
         assert future_date not in fetched_dates
         assert past_date in fetched_dates
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers (new methods on MarketDatabase)
+# ---------------------------------------------------------------------------
+
+class TestMarketDatabaseCheckpoints:
+    """Tests for get_ingested_price_dates and get_latest_indicator_date."""
+
+    def test_get_ingested_price_dates_returns_empty_set_when_no_data(self, market_db):
+        """With no prices stored, the set should be empty."""
+        result = market_db.get_ingested_price_dates()
+        assert result == set()
+
+    def test_get_ingested_price_dates_returns_stored_dates(self, market_db, sample_prices):
+        """Dates from asset_prices should appear in the returned set."""
+        market_db.upsert_prices(sample_prices)
+        dates = market_db.get_ingested_price_dates()
+        expected = {r["date"] for r in sample_prices}
+        assert expected.issubset(dates)
+
+    def test_get_ingested_price_dates_returns_distinct_dates(self, market_db):
+        """Even if multiple tickers have prices on the same date, the date appears once."""
+        prices = [
+            {"ticker": "PETR4", "date": "2026-04-01", "open": 35.0, "close": 36.0,
+             "high": 36.5, "low": 34.5, "avg_price": 35.5, "volume": 100.0},
+            {"ticker": "VALE3", "date": "2026-04-01", "open": 60.0, "close": 61.0,
+             "high": 62.0, "low": 59.0, "avg_price": 60.5, "volume": 200.0},
+        ]
+        market_db.upsert_prices(prices)
+        dates = market_db.get_ingested_price_dates()
+        assert dates == {"2026-04-01"}
+
+    def test_get_latest_indicator_date_returns_none_when_empty(self, market_db):
+        """With no indicators stored, None should be returned."""
+        result = market_db.get_latest_indicator_date()
+        assert result is None
+
+    def test_get_latest_indicator_date_returns_max_date(self, market_db):
+        """Should return the most recent date across all indicators."""
+        records = [
+            {"date": "2026-03-01", "indicator": "turnover", "value": 1_000_000.0},
+            {"date": "2026-04-05", "indicator": "turnover", "value": 2_000_000.0},
+            {"date": "2026-04-03", "indicator": "trin", "value": 1.2},
+        ]
+        market_db.upsert_indicators(records)
+        result = market_db.get_latest_indicator_date()
+        assert result == "2026-04-05"

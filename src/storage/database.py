@@ -225,6 +225,35 @@ class NewsDatabase:
             logger.error(f"Error querying news by source: {str(e)}")
             return []
     
+    def get_latest_published_at_by_source(self, source: str) -> Optional[str]:
+        """
+        Return the most recent ``published_at`` value stored for *source*.
+
+        Used as a checkpoint so RSS ingestion can skip articles published on
+        or before the date already in the database.
+
+        Args:
+            source: Source name as stored in the ``source`` column.
+
+        Returns:
+            ISO datetime string of the latest stored ``published_at``, or
+            ``None`` when no records exist for this source.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT MAX(published_at) AS latest FROM news WHERE source = ?",
+                    (source,),
+                )
+                row = cursor.fetchone()
+                return row["latest"] if row and row["latest"] else None
+        except Exception as exc:
+            logger.error(
+                "Error querying latest published_at for source '%s': %s", source, exc
+            )
+            return None
+
     def get_latest_news(self, limit: int = 10) -> List[Dict]:
         """
         Get the latest news entries.

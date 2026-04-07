@@ -185,3 +185,52 @@ class TestNewsDatabase:
         deleted = db.delete_old_neutral_news(days=7)
         assert deleted == 0
         assert db.get_news_count() == 1
+
+    def test_get_latest_published_at_by_source_returns_max(self, db, sample_news):
+        """Should return the most recent published_at for a source."""
+        older = {
+            "title": "Older article",
+            "summary": "Older content",
+            "link": "https://example.com/older",
+            "published_at": "2026-03-20T08:00:00",
+            "source": "TestSource",
+            "collected_at": "2026-03-20T09:00:00",
+        }
+        newer = {
+            "title": "Newer article",
+            "summary": "Newer content",
+            "link": "https://example.com/newer",
+            "published_at": "2026-03-26T10:00:00",
+            "source": "TestSource",
+            "collected_at": "2026-03-26T11:00:00",
+        }
+        db.insert_news([older, newer])
+
+        result = db.get_latest_published_at_by_source("TestSource")
+        assert result == "2026-03-26T10:00:00"
+
+    def test_get_latest_published_at_by_source_returns_none_when_empty(self, db):
+        """Should return None when no records exist for the source."""
+        result = db.get_latest_published_at_by_source("NonExistentSource")
+        assert result is None
+
+    def test_get_latest_published_at_by_source_isolates_sources(self, db):
+        """Checkpoint for one source should not be affected by another source's data."""
+        db.insert_news([
+            {
+                "title": "Source A article",
+                "summary": "content",
+                "link": "https://example.com/a",
+                "published_at": "2026-04-01T10:00:00",
+                "source": "SourceA",
+                "collected_at": "2026-04-01T11:00:00",
+            }
+        ])
+
+        # SourceB has no records
+        result_b = db.get_latest_published_at_by_source("SourceB")
+        assert result_b is None
+
+        # SourceA checkpoint is intact
+        result_a = db.get_latest_published_at_by_source("SourceA")
+        assert result_a == "2026-04-01T10:00:00"
