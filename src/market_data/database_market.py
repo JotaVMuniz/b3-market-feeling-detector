@@ -148,6 +148,54 @@ class MarketDatabase:
             raise
 
     # ------------------------------------------------------------------
+    # Checkpoint helpers
+    # ------------------------------------------------------------------
+
+    def get_ingested_price_dates(self) -> set:
+        """
+        Return the set of dates (``YYYY-MM-DD`` strings) that have at least
+        one price record in ``asset_prices``.
+
+        Used as a checkpoint so the prices stage skips dates that have
+        already been fetched from B3, avoiding redundant API calls.
+
+        Returns:
+            Set of ISO date strings.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT date FROM asset_prices")
+                return {row["date"] for row in cursor.fetchall()}
+        except Exception as exc:
+            logger.error("Error querying ingested price dates: %s", exc)
+            return set()
+
+    def get_latest_indicator_date(self) -> Optional[str]:
+        """
+        Return the most recent date present in ``sentiment_indicators``, or
+        ``None`` when the table is empty.
+
+        Used as a checkpoint so the indicators stage only fetches the delta
+        (days after the last stored date) rather than re-fetching the full
+        history on every run.
+
+        Returns:
+            ISO date string (``YYYY-MM-DD``) or ``None``.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT MAX(date) AS latest FROM sentiment_indicators"
+                )
+                row = cursor.fetchone()
+                return row["latest"] if row and row["latest"] else None
+        except Exception as exc:
+            logger.error("Error querying latest indicator date: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
     # asset_prices
     # ------------------------------------------------------------------
 

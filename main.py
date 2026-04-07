@@ -1,10 +1,13 @@
 """
 Main orchestration module for the financial news ingestion pipeline.
 
-The pipeline is split into six independent stages that can be run separately:
+The pipeline is split into independent stages that can be run separately:
 
 - raw:        Fetch news from RSS feeds, clean and persist raw records.
+- tweets:     Fetch recent posts from X (Twitter) about the Brazilian financial
+              market and persist them in the same news table.
 - trusted:    Enrich stored news with NLP/LLM sentiment analysis.
+- cleanup:    Delete neutral-sentiment news/posts older than 7 days.
 - prices:     Fetch B3 market prices (fully independent of news data).
 - indicators: Fetch sentiment indicators (turnover, TRIN, PCR, CDI, etc.)
               and compute the composite Fear & Greed index.
@@ -14,8 +17,10 @@ The pipeline is split into six independent stages that can be run separately:
 Usage::
 
     python main.py --stage raw
+    python main.py --stage tweets
     python main.py --stage trusted
     python main.py --stage trusted --reprocess-existing
+    python main.py --stage cleanup
     python main.py --stage prices
     python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
     python main.py --stage indicators
@@ -49,6 +54,7 @@ logger = logging.getLogger(__name__)
 # Import pipeline modules
 from src.ingestion.sources import get_sources
 from src.ingestion.fetch_news import fetch_all_news, deduplicate_news
+from src.ingestion.fetch_tweets import fetch_tweets
 from src.processing.clean_news import clean_news_batch, validate_news_entry
 from src.storage.save_raw import save_raw_news
 from src.storage.database import NewsDatabase
@@ -108,6 +114,16 @@ def run_raw() -> None:
     """
     Stage 1 – Raw: fetch news from RSS feeds, clean and persist.
 
+    A **per-source checkpoint** is applied before the database insert: articles
+    whose ``published_at`` is on or before the most recently stored
+    ``published_at`` for that source are silently dropped.  This avoids
+    reprocessing content already in the database while still storing genuinely
+    new items from every feed.
+
+    The URL uniqueness constraint in the ``news`` table acts as a secondary
+    safety net so that any item that slips past the checkpoint is still
+    deduplicated.
+
     Produces:
     - A JSON snapshot under ``data/raw/news_YYYYMMDD.json``
     - Basic (unenriched) news records inserted into the ``news`` table
@@ -137,14 +153,111 @@ def run_raw() -> None:
         logger.warning("No valid news entries after cleaning. Stage RAW complete.")
         return
 
+    # ------------------------------------------------------------------
+    # Checkpoint: skip articles already in the database (per-source)
+    # ------------------------------------------------------------------
+    db = NewsDatabase()
+    source_checkpoints: dict = {}
+    for n in valid_news:
+        src = n.get("source", "")
+        if src and src not in source_checkpoints:
+            source_checkpoints[src] = db.get_latest_published_at_by_source(src)
+
+    before_cp = len(valid_news)
+    valid_news = [
+        n for n in valid_news
+        if not (
+            n.get("published_at")
+            and source_checkpoints.get(n.get("source", ""))
+            and n["published_at"] <= source_checkpoints[n.get("source", "")]
+        )
+    ]
+    skipped_cp = before_cp - len(valid_news)
+    if skipped_cp:
+        logger.info(
+            "News checkpoint: skipped %d article(s) already ingested", skipped_cp
+        )
+
+    if not valid_news:
+        logger.info("No new news after checkpoint filter. Stage RAW complete.")
+        return
+
     raw_file = save_raw_news(valid_news)
     logger.info(f"Raw data saved to: {raw_file}")
 
-    db = NewsDatabase()
     inserted = db.insert_news(valid_news)
     logger.info(f"Inserted {inserted} records into news table")
 
     logger.info("Stage RAW complete\n")
+
+
+def run_tweets() -> None:
+    """
+    Stage 1b – Tweets: fetch recent posts from X (Twitter) and persist them.
+
+    Fetches up to 100 posts matching Brazilian financial market keywords
+    (Portuguese) from the last 7 days using the Twitter API v2
+    ``/2/tweets/search/recent`` endpoint.
+
+    A **checkpoint** is applied automatically: the ``published_at`` of the
+    most recently stored tweet is passed to the API as ``start_time`` so
+    only posts newer than the last ingestion are returned.
+
+    Requires ``TWITTER_BEARER_TOKEN`` to be set in the environment.  When the
+    token is absent the stage is skipped gracefully so the rest of the
+    pipeline can continue.
+
+    Tweets are stored in the same ``news`` table as RSS news and will be
+    enriched during the ``trusted`` stage.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: TWEETS — fetching posts from X (Twitter)")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+
+    # Checkpoint: only fetch tweets newer than the last stored tweet
+    from src.ingestion.fetch_tweets import SOURCE_NAME as _TWEET_SOURCE
+    start_time = db.get_latest_published_at_by_source(_TWEET_SOURCE)
+    if start_time:
+        logger.info("Tweet checkpoint: fetching posts after %s", start_time)
+
+    tweets = fetch_tweets(start_time=start_time)
+    logger.info(f"Tweets fetched: {len(tweets)}")
+
+    if not tweets:
+        logger.info("No tweets to store. Stage TWEETS complete.")
+        return
+
+    deduplicated = deduplicate_news(tweets)
+    logger.info(f"After deduplication: {len(deduplicated)}")
+
+    inserted = db.insert_news(deduplicated)
+    logger.info(f"Inserted {inserted} tweet records into news table")
+
+    logger.info("Stage TWEETS complete\n")
+
+
+def run_cleanup(days: int = 7) -> None:
+    """
+    Cleanup stage – delete neutral-sentiment news and posts older than *days* days.
+
+    This stage keeps the database focused on relevant, non-neutral recent
+    events.  Records with ``sentiment = 'neutro'`` whose ``published_at``
+    timestamp is older than the cutoff are removed from the ``news`` table.
+
+    Args:
+        days: Age threshold in calendar days (default 7).
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: CLEANUP — removing stale neutral news/posts")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    deleted = db.delete_old_neutral_news(days=days)
+    logger.info(f"Deleted {deleted} stale neutral records")
+
+    logger.info("Stage CLEANUP complete\n")
 
 
 def run_trusted(reprocess_all: bool = False) -> None:
@@ -212,6 +325,12 @@ def run_prices(
     used.  When *dates* is ``None`` the publication dates of stored news
     (plus a D+1 through D+5 lookahead) are used, capped at today.
 
+    A **checkpoint** is applied when *dates* is auto-computed (i.e. not
+    explicitly provided by the caller): any date already present in
+    ``asset_prices`` is removed from the fetch list so the stage only
+    downloads data that is genuinely missing.  When explicit *dates* are
+    passed the checkpoint is skipped so the caller has full control.
+
     Args:
         tickers: Explicit list of B3 ticker codes.  Auto-detected if ``None``.
         dates:   Explicit list of trading dates.  Auto-detected if ``None``.
@@ -219,6 +338,9 @@ def run_prices(
     logger.info("=" * 60)
     logger.info("Stage: PRICES — fetching B3 market data")
     logger.info("=" * 60)
+
+    # Remember whether dates were explicitly provided (disables checkpoint)
+    _explicit_dates = dates is not None
 
     db = NewsDatabase()
     market_db = MarketDatabase(db_path=db.db_path)
@@ -266,6 +388,28 @@ def run_prices(
     if not dates:
         logger.warning("No valid dates to fetch — skipping PRICES stage")
         return
+
+    # ------------------------------------------------------------------
+    # Checkpoint: skip dates already in asset_prices (auto-detected only)
+    # ------------------------------------------------------------------
+    if not _explicit_dates:
+        ingested_dates = market_db.get_ingested_price_dates()
+        if ingested_dates:
+            before_cp = len(dates)
+            dates = [d for d in dates if d.isoformat() not in ingested_dates]
+            skipped_cp = before_cp - len(dates)
+            if skipped_cp:
+                logger.info(
+                    "Price checkpoint: skipping %d already-ingested date(s); "
+                    "%d date(s) remain",
+                    skipped_cp,
+                    len(dates),
+                )
+        if not dates:
+            logger.info(
+                "All price dates already ingested — skipping PRICES fetch"
+            )
+            return
 
     logger.info(f"Date range: {dates[0]} -> {dates[-1]} ({len(dates)} dates)")
 
@@ -344,6 +488,13 @@ def run_indicators(
     and then computes and stores the composite Fear & Greed index in
     ``composite_sentiment_index``.
 
+    A **checkpoint** is applied when *start_date* is not explicitly set:
+    the stage queries the most recent date already in ``sentiment_indicators``
+    and advances the effective start date to the following day, so only the
+    delta (new trading sessions) is fetched.  When *start_date* is explicitly
+    provided (e.g. via ``--from`` on the CLI) the checkpoint is skipped and
+    the full requested range is fetched, allowing historical re-ingestion.
+
     Args:
         start_date: First date to fetch (inclusive). Defaults to 252 trading
                     days (≈1 year) before today to build a sufficient history
@@ -354,6 +505,9 @@ def run_indicators(
     logger.info("Stage: INDICATORS — fetching sentiment indicators")
     logger.info("=" * 60)
 
+    # Remember whether start_date was explicitly provided (disables checkpoint)
+    _explicit_start = start_date is not None
+
     today = datetime.date.today()
     if end_date is None:
         end_date = today
@@ -363,6 +517,34 @@ def run_indicators(
 
     db = NewsDatabase()
     market_db = MarketDatabase(db_path=db.db_path)
+
+    # ------------------------------------------------------------------
+    # Checkpoint: advance start_date to the day after the latest stored
+    # indicator (only when start_date was auto-computed)
+    # ------------------------------------------------------------------
+    if not _explicit_start:
+        latest_indicator_date = market_db.get_latest_indicator_date()
+        if latest_indicator_date:
+            checkpoint_date = (
+                datetime.date.fromisoformat(latest_indicator_date)
+                + datetime.timedelta(days=1)
+            )
+            if checkpoint_date > start_date:
+                logger.info(
+                    "Indicator checkpoint: advancing start_date %s → %s",
+                    start_date,
+                    checkpoint_date,
+                )
+                start_date = checkpoint_date
+
+    if start_date > end_date:
+        logger.info(
+            "Indicators already up to date (last stored: %s) — "
+            "skipping INDICATORS fetch",
+            market_db.get_latest_indicator_date() or "none",
+        )
+        logger.info("Stage INDICATORS complete\n")
+        return
 
     # ------------------------------------------------------------------
     # Fetch B3 market indicators (turnover, TRIN, PCR, % advancing)
@@ -453,7 +635,7 @@ def run_analytics() -> None:
 
 def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
-    Execute the full pipeline: raw -> trusted -> prices -> indicators -> analytics.
+    Execute the full pipeline: raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics.
 
     This function acts as an orchestrator that calls each stage in order.
     It is preserved for backward compatibility.
@@ -463,12 +645,14 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> trusted -> prices -> indicators -> analytics)")
+    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics)")
     logger.info("=" * 60)
 
     try:
         run_raw()
+        run_tweets()
         run_trusted(reprocess_all=reprocess_existing)
+        run_cleanup()
         if fetch_market_data:
             run_prices()
             run_indicators()
@@ -494,8 +678,10 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python main.py --stage raw
+  python main.py --stage tweets
   python main.py --stage trusted
   python main.py --stage trusted --reprocess-existing
+  python main.py --stage cleanup
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage indicators
@@ -510,7 +696,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'trusted', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
+        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -575,8 +761,12 @@ Examples:
 
     if args.stage == 'raw':
         run_raw()
+    elif args.stage == 'tweets':
+        run_tweets()
     elif args.stage == 'trusted':
         run_trusted(reprocess_all=args.reprocess_existing)
+    elif args.stage == 'cleanup':
+        run_cleanup()
     elif args.stage == 'prices':
         run_prices(tickers=_tickers_arg, dates=_dates_arg)
     elif args.stage == 'indicators':

@@ -117,3 +117,120 @@ class TestNewsDatabase:
         assert result[0]["is_relevant"] == 0
         assert result[0]["sentiment"] == "neutro"
         assert result[0]["confidence"] == 0.0
+
+    def test_delete_old_neutral_news_removes_stale_records(self, db):
+        """Neutral news older than the cutoff should be removed."""
+        old_neutral = {
+            "title": "Old neutral news",
+            "summary": "Old neutral content",
+            "link": "https://example.com/old-neutral",
+            "published_at": "2020-01-01T00:00:00",
+            "source": "TestSource",
+            "collected_at": "2020-01-01T01:00:00",
+            "sentiment": "neutro",
+            "confidence": 0.0,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([old_neutral])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 1
+        assert db.get_news_count() == 0
+
+    def test_delete_old_neutral_news_preserves_recent_records(self, db):
+        """Neutral news within the cutoff window should NOT be removed."""
+        from datetime import datetime, timedelta, timezone
+        recent_published = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+
+        recent_neutral = {
+            "title": "Recent neutral news",
+            "summary": "Recent neutral content",
+            "link": "https://example.com/recent-neutral",
+            "published_at": recent_published,
+            "source": "TestSource",
+            "collected_at": recent_published,
+            "sentiment": "neutro",
+            "confidence": 0.0,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([recent_neutral])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 0
+        assert db.get_news_count() == 1
+
+    def test_delete_old_neutral_news_preserves_non_neutral_records(self, db):
+        """Old but non-neutral (positive/negative) news should NOT be removed."""
+        old_positive = {
+            "title": "Old positive news",
+            "summary": "Old positive content",
+            "link": "https://example.com/old-positive",
+            "published_at": "2020-01-01T00:00:00",
+            "source": "TestSource",
+            "collected_at": "2020-01-01T01:00:00",
+            "sentiment": "positivo",
+            "confidence": 0.9,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([old_positive])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 0
+        assert db.get_news_count() == 1
+
+    def test_get_latest_published_at_by_source_returns_max(self, db, sample_news):
+        """Should return the most recent published_at for a source."""
+        older = {
+            "title": "Older article",
+            "summary": "Older content",
+            "link": "https://example.com/older",
+            "published_at": "2026-03-20T08:00:00",
+            "source": "TestSource",
+            "collected_at": "2026-03-20T09:00:00",
+        }
+        newer = {
+            "title": "Newer article",
+            "summary": "Newer content",
+            "link": "https://example.com/newer",
+            "published_at": "2026-03-26T10:00:00",
+            "source": "TestSource",
+            "collected_at": "2026-03-26T11:00:00",
+        }
+        db.insert_news([older, newer])
+
+        result = db.get_latest_published_at_by_source("TestSource")
+        assert result == "2026-03-26T10:00:00"
+
+    def test_get_latest_published_at_by_source_returns_none_when_empty(self, db):
+        """Should return None when no records exist for the source."""
+        result = db.get_latest_published_at_by_source("NonExistentSource")
+        assert result is None
+
+    def test_get_latest_published_at_by_source_isolates_sources(self, db):
+        """Checkpoint for one source should not be affected by another source's data."""
+        db.insert_news([
+            {
+                "title": "Source A article",
+                "summary": "content",
+                "link": "https://example.com/a",
+                "published_at": "2026-04-01T10:00:00",
+                "source": "SourceA",
+                "collected_at": "2026-04-01T11:00:00",
+            }
+        ])
+
+        # SourceB has no records
+        result_b = db.get_latest_published_at_by_source("SourceB")
+        assert result_b is None
+
+        # SourceA checkpoint is intact
+        result_a = db.get_latest_published_at_by_source("SourceA")
+        assert result_a == "2026-04-01T10:00:00"
