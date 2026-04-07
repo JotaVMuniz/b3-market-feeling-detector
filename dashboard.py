@@ -608,7 +608,7 @@ def _render_asset_tab():
         ticker_to_name = dict(zip(companies_df["ticker"], companies_df["name"]))
 
     options = [
-        f"{t} — {ticker_to_name[t]}" if ticker_to_name.get(t) else t
+        f"{t} — {ticker_to_name.get(t)}" if ticker_to_name.get(t) else t
         for t in tickers
     ]
 
@@ -769,8 +769,7 @@ def _render_asset_tab():
                     _render_sentiment_indicator(seg_sentiment)
                 _render_news_rows(seg_df, max_rows=20)
     else:
-        if not news_df.empty:
-            st.caption("ℹ️ Nenhum segmento identificado para este ativo com base nas notícias disponíveis.")
+        st.caption("ℹ️ Nenhum segmento identificado para este ativo com base nas notícias disponíveis.")
 
 
 def _render_news_tab():
