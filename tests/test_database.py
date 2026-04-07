@@ -117,3 +117,71 @@ class TestNewsDatabase:
         assert result[0]["is_relevant"] == 0
         assert result[0]["sentiment"] == "neutro"
         assert result[0]["confidence"] == 0.0
+
+    def test_delete_old_neutral_news_removes_stale_records(self, db):
+        """Neutral news older than the cutoff should be removed."""
+        old_neutral = {
+            "title": "Old neutral news",
+            "summary": "Old neutral content",
+            "link": "https://example.com/old-neutral",
+            "published_at": "2020-01-01T00:00:00",
+            "source": "TestSource",
+            "collected_at": "2020-01-01T01:00:00",
+            "sentiment": "neutro",
+            "confidence": 0.0,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([old_neutral])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 1
+        assert db.get_news_count() == 0
+
+    def test_delete_old_neutral_news_preserves_recent_records(self, db):
+        """Neutral news within the cutoff window should NOT be removed."""
+        from datetime import datetime, timedelta, timezone
+        recent_published = (
+            datetime.now(timezone.utc) - timedelta(days=1)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+
+        recent_neutral = {
+            "title": "Recent neutral news",
+            "summary": "Recent neutral content",
+            "link": "https://example.com/recent-neutral",
+            "published_at": recent_published,
+            "source": "TestSource",
+            "collected_at": recent_published,
+            "sentiment": "neutro",
+            "confidence": 0.0,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([recent_neutral])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 0
+        assert db.get_news_count() == 1
+
+    def test_delete_old_neutral_news_preserves_non_neutral_records(self, db):
+        """Old but non-neutral (positive/negative) news should NOT be removed."""
+        old_positive = {
+            "title": "Old positive news",
+            "summary": "Old positive content",
+            "link": "https://example.com/old-positive",
+            "published_at": "2020-01-01T00:00:00",
+            "source": "TestSource",
+            "collected_at": "2020-01-01T01:00:00",
+            "sentiment": "positivo",
+            "confidence": 0.9,
+            "segments": [],
+            "tickers": [],
+        }
+        db.insert_news([old_positive])
+        assert db.get_news_count() == 1
+
+        deleted = db.delete_old_neutral_news(days=7)
+        assert deleted == 0
+        assert db.get_news_count() == 1

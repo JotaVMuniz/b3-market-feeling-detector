@@ -304,6 +304,47 @@ class NewsDatabase:
             logger.error(f"Error querying all news: {str(e)}")
             return []
 
+    def delete_old_neutral_news(self, days: int = 7) -> int:
+        """
+        Delete neutral-sentiment news and posts that are older than *days* days.
+
+        This cleanup step keeps the database focused on relevant, non-neutral
+        recent events.  Records with ``sentiment = 'neutro'`` whose
+        ``published_at`` value is older than the cutoff date are removed.
+
+        Args:
+            days: Age threshold in calendar days (default 7).
+
+        Returns:
+            Number of records deleted.
+        """
+        import datetime as _dt
+        cutoff = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+        ).strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    DELETE FROM news
+                    WHERE sentiment = 'neutro'
+                      AND published_at IS NOT NULL
+                      AND published_at < ?
+                    """,
+                    (cutoff,),
+                )
+                deleted = cursor.rowcount
+            logger.info(
+                "Cleanup: deleted %d neutral news/posts older than %d days",
+                deleted,
+                days,
+            )
+            return deleted
+        except Exception as exc:
+            logger.error("Error during neutral-news cleanup: %s", exc)
+            return 0
+
     def update_news_batch(self, news_list: List[Dict]) -> int:
         """
         Update enrichment fields for an existing batch of news records.

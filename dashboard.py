@@ -839,8 +839,8 @@ def _render_asset_tab():
 
 
 def _render_news_tab():
-    """📰 Full news feed with sentiment filters."""
-    st.header("📰 Notícias & Sentimento")
+    """📰 Full news and X posts feed with sentiment filters."""
+    st.header("📰 Notícias & Posts — Sentimento do Mercado")
 
     # --- Inline filters (previously in sidebar) ---------------------------------
     st.subheader("🔍 Filtros")
@@ -937,11 +937,16 @@ def _render_news_tab():
         pub = row["published_at"].strftime("%Y-%m-%d %H:%M") if pd.notna(row["published_at"]) else "N/A"
         sent = row.get("sentiment", "neutro") or "neutro"
         color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
-        with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+        source = row.get("source", "") or ""
+        source_icon = "🐦" if source == "X (Twitter)" else "📄"
+        link_label = "Ver post no X" if source == "X (Twitter)" else "Leia mais"
+        with st.expander(f"{color} {source_icon} {row['title']} — {source} ({pub})"):
             col1, col2 = st.columns([3, 1])
             with col1:
-                st.markdown(row.get("content") or "")
-                st.markdown(f"[🔗 Leia mais]({row['url']})")
+                content = row.get("content") or ""
+                if content and content != row["title"]:
+                    st.markdown(content)
+                st.markdown(f"[🔗 {link_label}]({row['url']})")
             with col2:
                 st.markdown(f"**Sentimento:** {sent}")
                 conf = row.get("confidence", 0)
@@ -1194,7 +1199,7 @@ def main():
         "📊 Visão Geral",
         "📈 Por Ativo",
         "🧭 Indicadores",
-        "📰 Notícias",
+        "📰 Notícias & Posts",
     ])
 
     with tab_overview:

@@ -79,6 +79,9 @@ def _make_mock_market_db():
     m.upsert_prices.return_value = 0
     m.upsert_companies.return_value = 0
     m.upsert_correlations.return_value = 0
+    m.upsert_indicators.return_value = 0
+    m.upsert_composite_index.return_value = 0
+    m.get_indicators.return_value = []
     return m
 
 
@@ -99,9 +102,14 @@ def test_run_pipeline_reprocess_existing_updates_database(monkeypatch):
          patch("main.validate_news_entry", return_value=True), \
          patch("main.enrich_batch", return_value=_ENRICHMENT_RESULT), \
          patch("main.save_raw_news", return_value="data/raw/news.json"), \
+         patch("main.fetch_tweets", return_value=[]), \
          patch("main.NewsDatabase", return_value=mock_db), \
          patch("main.MarketDatabase", return_value=mock_market_db), \
          patch("main.fetch_prices_for_tickers", return_value=[]), \
+         patch("main.fetch_market_indicators_range", return_value={}), \
+         patch("main.fetch_bcb_indicators", return_value=[]), \
+         patch("main.indicators_to_raw_records", return_value=[]), \
+         patch("main.compute_composite_index", return_value=[]), \
          patch("main.compute_correlations", return_value=[]):
         run_pipeline(reprocess_existing=True)
 

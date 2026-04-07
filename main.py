@@ -1,10 +1,13 @@
 """
 Main orchestration module for the financial news ingestion pipeline.
 
-The pipeline is split into six independent stages that can be run separately:
+The pipeline is split into independent stages that can be run separately:
 
 - raw:        Fetch news from RSS feeds, clean and persist raw records.
+- tweets:     Fetch recent posts from X (Twitter) about the Brazilian financial
+              market and persist them in the same news table.
 - trusted:    Enrich stored news with NLP/LLM sentiment analysis.
+- cleanup:    Delete neutral-sentiment news/posts older than 7 days.
 - prices:     Fetch B3 market prices (fully independent of news data).
 - indicators: Fetch sentiment indicators (turnover, TRIN, PCR, CDI, etc.)
               and compute the composite Fear & Greed index.
@@ -14,8 +17,10 @@ The pipeline is split into six independent stages that can be run separately:
 Usage::
 
     python main.py --stage raw
+    python main.py --stage tweets
     python main.py --stage trusted
     python main.py --stage trusted --reprocess-existing
+    python main.py --stage cleanup
     python main.py --stage prices
     python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
     python main.py --stage indicators
@@ -49,6 +54,7 @@ logger = logging.getLogger(__name__)
 # Import pipeline modules
 from src.ingestion.sources import get_sources
 from src.ingestion.fetch_news import fetch_all_news, deduplicate_news
+from src.ingestion.fetch_tweets import fetch_tweets
 from src.processing.clean_news import clean_news_batch, validate_news_entry
 from src.storage.save_raw import save_raw_news
 from src.storage.database import NewsDatabase
@@ -145,6 +151,64 @@ def run_raw() -> None:
     logger.info(f"Inserted {inserted} records into news table")
 
     logger.info("Stage RAW complete\n")
+
+
+def run_tweets() -> None:
+    """
+    Stage 1b – Tweets: fetch recent posts from X (Twitter) and persist them.
+
+    Fetches up to 100 posts matching Brazilian financial market keywords
+    (Portuguese) from the last 7 days using the Twitter API v2
+    ``/2/tweets/search/recent`` endpoint.
+
+    Requires ``TWITTER_BEARER_TOKEN`` to be set in the environment.  When the
+    token is absent the stage is skipped gracefully so the rest of the
+    pipeline can continue.
+
+    Tweets are stored in the same ``news`` table as RSS news and will be
+    enriched during the ``trusted`` stage.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: TWEETS — fetching posts from X (Twitter)")
+    logger.info("=" * 60)
+
+    tweets = fetch_tweets()
+    logger.info(f"Tweets fetched: {len(tweets)}")
+
+    if not tweets:
+        logger.info("No tweets to store. Stage TWEETS complete.")
+        return
+
+    deduplicated = deduplicate_news(tweets)
+    logger.info(f"After deduplication: {len(deduplicated)}")
+
+    db = NewsDatabase()
+    inserted = db.insert_news(deduplicated)
+    logger.info(f"Inserted {inserted} tweet records into news table")
+
+    logger.info("Stage TWEETS complete\n")
+
+
+def run_cleanup(days: int = 7) -> None:
+    """
+    Cleanup stage – delete neutral-sentiment news and posts older than *days* days.
+
+    This stage keeps the database focused on relevant, non-neutral recent
+    events.  Records with ``sentiment = 'neutro'`` whose ``published_at``
+    timestamp is older than the cutoff are removed from the ``news`` table.
+
+    Args:
+        days: Age threshold in calendar days (default 7).
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: CLEANUP — removing stale neutral news/posts")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    deleted = db.delete_old_neutral_news(days=days)
+    logger.info(f"Deleted {deleted} stale neutral records")
+
+    logger.info("Stage CLEANUP complete\n")
 
 
 def run_trusted(reprocess_all: bool = False) -> None:
@@ -453,7 +517,7 @@ def run_analytics() -> None:
 
 def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
-    Execute the full pipeline: raw -> trusted -> prices -> indicators -> analytics.
+    Execute the full pipeline: raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics.
 
     This function acts as an orchestrator that calls each stage in order.
     It is preserved for backward compatibility.
@@ -463,12 +527,14 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> trusted -> prices -> indicators -> analytics)")
+    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics)")
     logger.info("=" * 60)
 
     try:
         run_raw()
+        run_tweets()
         run_trusted(reprocess_all=reprocess_existing)
+        run_cleanup()
         if fetch_market_data:
             run_prices()
             run_indicators()
@@ -494,8 +560,10 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python main.py --stage raw
+  python main.py --stage tweets
   python main.py --stage trusted
   python main.py --stage trusted --reprocess-existing
+  python main.py --stage cleanup
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage indicators
@@ -510,7 +578,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'trusted', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
+        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -575,8 +643,12 @@ Examples:
 
     if args.stage == 'raw':
         run_raw()
+    elif args.stage == 'tweets':
+        run_tweets()
     elif args.stage == 'trusted':
         run_trusted(reprocess_all=args.reprocess_existing)
+    elif args.stage == 'cleanup':
+        run_cleanup()
     elif args.stage == 'prices':
         run_prices(tickers=_tickers_arg, dates=_dates_arg)
     elif args.stage == 'indicators':
