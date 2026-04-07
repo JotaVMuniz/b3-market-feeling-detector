@@ -267,7 +267,7 @@ def run_prices(
         logger.warning("No valid dates to fetch — skipping PRICES stage")
         return
 
-    logger.info(f"Date range: {dates[0]} → {dates[-1]} ({len(dates)} dates)")
+    logger.info(f"Date range: {dates[0]} -> {dates[-1]} ({len(dates)} dates)")
 
     price_records = fetch_prices_for_tickers(tickers=tickers, dates=dates)
 
@@ -453,7 +453,7 @@ def run_analytics() -> None:
 
 def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
-    Execute the full pipeline: raw → trusted → prices → indicators → analytics.
+    Execute the full pipeline: raw -> trusted -> prices -> indicators -> analytics.
 
     This function acts as an orchestrator that calls each stage in order.
     It is preserved for backward compatibility.
@@ -463,7 +463,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw → trusted → prices → indicators → analytics)")
+    logger.info("Starting full pipeline (raw -> trusted -> prices -> indicators -> analytics)")
     logger.info("=" * 60)
 
     try:

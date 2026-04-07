@@ -842,8 +842,9 @@ def _render_news_tab():
     """📰 Full news feed with sentiment filters."""
     st.header("📰 Notícias & Sentimento")
 
-    # --- Sidebar filters ----------------------------------------------------
-    st.sidebar.header("🔍 Filtros")
+    # --- Inline filters (previously in sidebar) ---------------------------------
+    st.subheader("🔍 Filtros")
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     try:
         conn = _conn()
@@ -852,7 +853,8 @@ def _render_news_tab():
         sources.insert(0, "Todas")
     except Exception:
         sources = ["Todas"]
-    source_filter = st.sidebar.selectbox("Fonte", sources, key="news_source")
+    with filter_col1:
+        source_filter = st.selectbox("Fonte", sources, key="news_source")
 
     try:
         conn = _conn()
@@ -871,17 +873,21 @@ def _render_news_tab():
         unique_segs = ["Todos"] + sorted(set(all_segs))
     except Exception:
         unique_segs = ["Todos"]
-    segment_filter = st.sidebar.selectbox("Segmento", unique_segs, key="news_seg")
+    with filter_col2:
+        segment_filter = st.selectbox("Segmento", unique_segs, key="news_seg")
 
-    sentiment_filter = st.sidebar.selectbox(
-        "Sentimento", ["Todos", "positivo", "negativo", "neutro"], key="news_sent"
-    )
+    with filter_col3:
+        sentiment_filter = st.selectbox(
+            "Sentimento", ["Todos", "positivo", "negativo", "neutro"], key="news_sent"
+        )
 
-    col1, col2 = st.sidebar.columns(2)
-    with col1:
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
         date_from = st.date_input("De", value=datetime.now() - timedelta(days=30), key="nf_from")
-    with col2:
+    with date_col2:
         date_to = st.date_input("Até", value=datetime.now(), key="nf_to")
+
+    st.divider()
 
     # --- Load & metrics -----------------------------------------------------
     df = load_news(
@@ -1008,10 +1014,13 @@ def _render_indicators_tab():
     date_from_str = str(date_from)
     date_to_str = str(date_to)
 
+    # Load all composite index data (for the current-score gauge)
+    composite_all_df = load_composite_index()
+    # Load filtered composite index data (for historical charts)
     composite_df = load_composite_index(date_from=date_from_str, date_to=date_to_str)
     indicators_df = load_sentiment_indicators(date_from=date_from_str, date_to=date_to_str)
 
-    if composite_df.empty and indicators_df.empty:
+    if composite_all_df.empty and indicators_df.empty:
         st.info(
             "🔄 Nenhum dado de indicadores disponível ainda. Execute o pipeline:\n"
             "```\npython main.py --stage indicators\n```\n\n"
@@ -1023,8 +1032,9 @@ def _render_indicators_tab():
     # ------------------------------------------------------------------
     # Composite index gauge + time-series
     # ------------------------------------------------------------------
-    if not composite_df.empty:
-        latest = composite_df.iloc[-1]
+    if not composite_all_df.empty:
+        # Gauge always reflects the most recent available score
+        latest = composite_all_df.iloc[-1]
         score = latest.get("score", 50.0)
         label = latest.get("label", "Neutro")
 
@@ -1032,7 +1042,7 @@ def _render_indicators_tab():
         with col_gauge:
             st.plotly_chart(_gauge_chart(score, label), use_container_width=True)
         with col_info:
-            st.subheader("Último Score")
+            st.subheader("Score Atual")
             st.metric("Índice Composto", f"{score:.1f} / 100", delta=label)
             st.caption(
                 f"Última atualização: **{latest['date'].strftime('%d/%m/%Y') if pd.notna(latest['date']) else 'N/A'}**"
@@ -1048,10 +1058,11 @@ def _render_indicators_tab():
 
         st.divider()
 
-        # Time-series of composite index
+        # Time-series of composite index — uses date-filtered data
+        chart_df = composite_df if not composite_df.empty else composite_all_df
         fig_idx = px.line(
-            composite_df, x="date", y="score",
-            title="Evolução do Índice de Sentimento (0 = Medo Extremo → 100 = Ganância Extrema)",
+            chart_df, x="date", y="score",
+            title="Evolução do Índice de Sentimento (0 = Medo Extremo | 100 = Ganancia Extrema)",
             labels={"date": "Data", "score": "Score"},
             color_discrete_sequence=["#1f77b4"],
         )
@@ -1062,8 +1073,8 @@ def _render_indicators_tab():
         fig_idx.add_hrect(y0=80, y1=100, fillcolor="#b8dfc5", opacity=0.15, line_width=0)
         st.plotly_chart(fig_idx, use_container_width=True)
 
-        # Component scores
-        score_cols = [c for c in composite_df.columns if c.endswith("_score") and composite_df[c].notna().any()]
+        # Component scores — uses date-filtered data
+        score_cols = [c for c in chart_df.columns if c.endswith("_score") and chart_df[c].notna().any()]
         if score_cols:
             st.subheader("📊 Componentes do Índice")
             fig_comp = go.Figure()
@@ -1079,7 +1090,7 @@ def _render_indicators_tab():
             for col in score_cols:
                 name = labels_map.get(col, col)
                 fig_comp.add_trace(go.Scatter(
-                    x=composite_df["date"], y=composite_df[col],
+                    x=chart_df["date"], y=chart_df[col],
                     mode="lines", name=name,
                 ))
             fig_comp.add_hline(y=50, line_dash="dash", line_color="gray")

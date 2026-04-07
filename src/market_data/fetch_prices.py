@@ -136,7 +136,7 @@ def fetch_all_prices_range(
         current += datetime.timedelta(days=1)
 
     logger.info(
-        f"fetch_all_prices_range({start_date} → {end_date}): {len(results)} records"
+        f"fetch_all_prices_range({start_date} -> {end_date}): {len(results)} records"
     )
     return results
 

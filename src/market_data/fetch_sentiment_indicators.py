@@ -194,7 +194,7 @@ def fetch_market_indicators_range(
         current += datetime.timedelta(days=1)
 
     logger.info(
-        "fetch_market_indicators_range(%s → %s): %d records",
+        "fetch_market_indicators_range(%s -> %s): %d records",
         start_date,
         end_date,
         len(results),
@@ -276,7 +276,7 @@ def fetch_bcb_indicators(
             )
 
     logger.info(
-        "fetch_bcb_indicators(%s → %s): %d records",
+        "fetch_bcb_indicators(%s -> %s): %d records",
         date_from,
         date_to,
         len(results),
