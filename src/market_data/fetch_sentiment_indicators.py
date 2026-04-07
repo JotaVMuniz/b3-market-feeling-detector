@@ -208,7 +208,9 @@ def fetch_market_indicators_range(
 
 # SGS series codes used as additional macroeconomic indicators
 _BCB_SERIES: Dict[str, int] = {
-    # CDI – already in mercados.bcb but we fetch it here as well
+    # CDI – fetched here even though it is already in mercados.bcb.series because
+    # we need it stored in the flat `sentiment_indicators` table under the key
+    # "cdi_rate" for use by the composite index computation.
     "CDI": 12,
     # ICC-FGV (Índice de Confiança do Consumidor – FGV/Fecomercio)
     "ICC": 4393,

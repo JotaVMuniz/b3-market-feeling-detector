@@ -336,7 +336,7 @@ def run_indicators(
     end_date: Optional[datetime.date] = None,
 ) -> None:
     """
-    Stage 5 – Indicators: fetch sentiment indicators and compute the composite index.
+    Stage 4 – Indicators: fetch sentiment indicators and compute the composite index.
 
     Fetches market sentiment indicators from B3 (turnover, TRIN, PCR,
     % advancing stocks) and BCB (CDI rate, consumer confidence, CDS) for
