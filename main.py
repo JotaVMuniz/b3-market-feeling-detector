@@ -1,13 +1,15 @@
 """
 Main orchestration module for the financial news ingestion pipeline.
 
-The pipeline is split into five independent stages that can be run separately:
+The pipeline is split into six independent stages that can be run separately:
 
-- raw:       Fetch news from RSS feeds, clean and persist raw records.
-- trusted:   Enrich stored news with NLP/LLM sentiment analysis.
-- prices:    Fetch B3 market prices (fully independent of news data).
-- analytics: Compute news–price correlations from stored data.
-- backfill:  Download full B3 price history for a date range (all assets).
+- raw:        Fetch news from RSS feeds, clean and persist raw records.
+- trusted:    Enrich stored news with NLP/LLM sentiment analysis.
+- prices:     Fetch B3 market prices (fully independent of news data).
+- indicators: Fetch sentiment indicators (turnover, TRIN, PCR, CDI, etc.)
+              and compute the composite Fear & Greed index.
+- analytics:  Compute news–price correlations from stored data.
+- backfill:   Download full B3 price history for a date range (all assets).
 
 Usage::
 
@@ -16,6 +18,8 @@ Usage::
     python main.py --stage trusted --reprocess-existing
     python main.py --stage prices
     python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
+    python main.py --stage indicators
+    python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
     python main.py --stage analytics
     python main.py --stage backfill
     python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
@@ -53,6 +57,14 @@ from src.market_data.database_market import MarketDatabase
 from src.market_data.fetch_prices import fetch_prices_for_tickers, fetch_all_prices_range
 from src.market_data.fetch_companies import extract_companies_from_prices
 from src.market_data.correlation import compute_correlations
+from src.market_data.fetch_sentiment_indicators import (
+    fetch_market_indicators_range,
+    fetch_bcb_indicators,
+)
+from src.market_data.compute_composite_index import (
+    compute_composite_index,
+    indicators_to_raw_records,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +331,81 @@ def run_backfill(
     logger.info("Stage BACKFILL complete\n")
 
 
+def run_indicators(
+    start_date: Optional[datetime.date] = None,
+    end_date: Optional[datetime.date] = None,
+) -> None:
+    """
+    Stage 5 – Indicators: fetch sentiment indicators and compute the composite index.
+
+    Fetches market sentiment indicators from B3 (turnover, TRIN, PCR,
+    % advancing stocks) and BCB (CDI rate, consumer confidence, CDS) for
+    the given date range, stores the raw values in ``sentiment_indicators``,
+    and then computes and stores the composite Fear & Greed index in
+    ``composite_sentiment_index``.
+
+    Args:
+        start_date: First date to fetch (inclusive). Defaults to 252 trading
+                    days (≈1 year) before today to build a sufficient history
+                    for percentile-rank normalisation.
+        end_date:   Last date to fetch (inclusive). Defaults to today.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: INDICATORS — fetching sentiment indicators")
+    logger.info("=" * 60)
+
+    today = datetime.date.today()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        # Default to ≈1 year back so percentile normalisation is meaningful
+        start_date = today - datetime.timedelta(days=365)
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+
+    # ------------------------------------------------------------------
+    # Fetch B3 market indicators (turnover, TRIN, PCR, % advancing)
+    # ------------------------------------------------------------------
+    market_recs = fetch_market_indicators_range(
+        start_date=start_date, end_date=end_date
+    )
+    flat_market = indicators_to_raw_records(market_recs)
+    written_b3 = market_db.upsert_indicators(flat_market)
+    logger.info(f"Stored {written_b3} B3 indicator records in sentiment_indicators")
+
+    # ------------------------------------------------------------------
+    # Fetch BCB indicators (CDI rate, consumer confidence, CDS)
+    # ------------------------------------------------------------------
+    bcb_recs = fetch_bcb_indicators(date_from=start_date, date_to=end_date)
+    written_bcb = market_db.upsert_indicators(bcb_recs)
+    logger.info(f"Stored {written_bcb} BCB indicator records in sentiment_indicators")
+
+    # ------------------------------------------------------------------
+    # Build composite index from all stored indicators
+    # ------------------------------------------------------------------
+    all_indicators = market_db.get_indicators()
+    composite_records = compute_composite_index(all_indicators)
+    if composite_records:
+        written_idx = market_db.upsert_composite_index(composite_records)
+        logger.info(f"Stored {written_idx} composite index records")
+        # Log the latest score for visibility
+        latest = composite_records[-1]
+        logger.info(
+            "Latest composite sentiment: date=%s score=%.1f label=%s",
+            latest["date"],
+            latest["score"],
+            latest["label"],
+        )
+    else:
+        logger.info(
+            "Insufficient data for composite index computation "
+            "(need at least 10 historical observations per indicator)"
+        )
+
+    logger.info("Stage INDICATORS complete\n")
+
+
 def run_analytics() -> None:
     """
     Stage 4 – Analytics: compute news–price correlations.
@@ -366,17 +453,17 @@ def run_analytics() -> None:
 
 def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
-    Execute the full pipeline: raw → trusted → prices → analytics.
+    Execute the full pipeline: raw → trusted → prices → indicators → analytics.
 
     This function acts as an orchestrator that calls each stage in order.
     It is preserved for backward compatibility.
 
     Args:
         reprocess_existing: Re-enrich all news records (trusted stage).
-        fetch_market_data:  If False, skip the prices and analytics stages.
+        fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw → trusted → prices → analytics)")
+    logger.info("Starting full pipeline (raw → trusted → prices → indicators → analytics)")
     logger.info("=" * 60)
 
     try:
@@ -384,6 +471,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         run_trusted(reprocess_all=reprocess_existing)
         if fetch_market_data:
             run_prices()
+            run_indicators()
             run_analytics()
 
         logger.info("=" * 60)
@@ -410,6 +498,8 @@ Examples:
   python main.py --stage trusted --reprocess-existing
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
+  python main.py --stage indicators
+  python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
   python main.py --stage analytics
   python main.py --stage backfill
   python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
@@ -420,7 +510,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'trusted', 'prices', 'analytics', 'backfill', 'all'],
+        choices=['raw', 'trusted', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -435,7 +525,7 @@ Examples:
     parser.add_argument(
         '--no-market-data',
         action='store_true',
-        help='Skip prices and analytics stages (all stage only).',
+        help='Skip prices, indicators and analytics stages (all stage only).',
     )
     parser.add_argument(
         '--tickers',
@@ -457,7 +547,7 @@ Examples:
         type=str,
         default='2025-01-01',
         metavar='YYYY-MM-DD',
-        help='Start date for the backfill stage (default: 2025-01-01).',
+        help='Start date for the backfill and indicators stages (default: 2025-01-01).',
     )
     parser.add_argument(
         '--to',
@@ -465,7 +555,7 @@ Examples:
         type=str,
         default=None,
         metavar='YYYY-MM-DD',
-        help='End date for the backfill stage (default: today).',
+        help='End date for the backfill and indicators stages (default: today).',
     )
 
     args = parser.parse_args()
@@ -489,6 +579,8 @@ Examples:
         run_trusted(reprocess_all=args.reprocess_existing)
     elif args.stage == 'prices':
         run_prices(tickers=_tickers_arg, dates=_dates_arg)
+    elif args.stage == 'indicators':
+        run_indicators(start_date=_from_date, end_date=_to_date)
     elif args.stage == 'analytics':
         run_analytics()
     elif args.stage == 'backfill':
