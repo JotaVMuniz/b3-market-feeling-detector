@@ -369,3 +369,48 @@ class TestDatabaseFundamentals:
         ])
         assert market_db.get_fundamentals("PETR4")[0]["value"] == 6.0
         assert market_db.get_fundamentals("VALE3")[0]["value"] == 8.0
+
+
+# ---------------------------------------------------------------------------
+# MarketDatabase.get_tickers_with_prices
+# ---------------------------------------------------------------------------
+
+class TestGetTickersWithPrices:
+    def _insert_price(self, market_db, ticker: str, date: str = "2025-01-02"):
+        market_db.upsert_prices([{
+            "ticker": ticker,
+            "date":   date,
+            "open":   10.0,
+            "high":   11.0,
+            "low":     9.0,
+            "close":  10.5,
+            "volume": 1000,
+        }])
+
+    def test_returns_only_tickers_with_prices(self, market_db):
+        self._insert_price(market_db, "PETR4")
+        self._insert_price(market_db, "VALE3")
+        result = market_db.get_tickers_with_prices()
+        assert result == {"PETR4", "VALE3"}
+
+    def test_excludes_tickers_in_companies_but_no_prices(self, market_db):
+        # Insert a company-only ticker (no prices)
+        with market_db.get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO companies (ticker, name) VALUES (?, ?)",
+                ("ITSAF130", "Fake NLP Ticker"),
+            )
+        # Insert a price for a real ticker
+        self._insert_price(market_db, "PETR4")
+        result = market_db.get_tickers_with_prices()
+        assert "ITSAF130" not in result
+        assert "PETR4" in result
+
+    def test_empty_database_returns_empty_set(self, market_db):
+        assert market_db.get_tickers_with_prices() == set()
+
+    def test_multiple_dates_same_ticker_counted_once(self, market_db):
+        self._insert_price(market_db, "PETR4", "2025-01-02")
+        self._insert_price(market_db, "PETR4", "2025-01-03")
+        result = market_db.get_tickers_with_prices()
+        assert result == {"PETR4"}

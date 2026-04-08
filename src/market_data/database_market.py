@@ -370,6 +370,24 @@ class MarketDatabase:
             logger.error(f"Error fetching known tickers: {exc}")
             return set()
 
+    def get_tickers_with_prices(self) -> set:
+        """Return the set of tickers that have at least one row in asset_prices.
+
+        This is more reliable than ``get_known_tickers`` for the fundamentals
+        stage because ``asset_prices`` only contains tickers that were
+        successfully fetched from B3, whereas the ``companies`` table is
+        populated from NLP-extracted mentions and may contain invalid codes
+        (e.g. ``ITSAF130``) that do not exist on Yahoo Finance.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT ticker FROM asset_prices")
+                return {row["ticker"] for row in cursor.fetchall()}
+        except Exception as exc:
+            logger.error(f"Error fetching tickers with prices: {exc}")
+            return set()
+
     # ------------------------------------------------------------------
     # news_price_correlation
     # ------------------------------------------------------------------

@@ -621,9 +621,12 @@ def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
     db = NewsDatabase()
     market_db = MarketDatabase(db_path=db.db_path)
 
-    # Resolve ticker list
+    # Resolve ticker list — use only tickers with actual price data so we
+    # don't query Yahoo Finance for NLP-extracted codes that are not real
+    # B3 tickers (e.g. codes like "ITSAF130" that come from the companies
+    # table but have no .SA equivalent on Yahoo Finance).
     if tickers is None:
-        tickers = list(market_db.get_known_tickers())
+        tickers = list(market_db.get_tickers_with_prices())
 
     if not tickers:
         logger.warning("No tickers found — skipping FUNDAMENTALS stage")
