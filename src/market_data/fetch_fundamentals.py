@@ -3,9 +3,13 @@ Fetch fundamental financial indicators for B3 assets.
 
 Data sources
 ------------
-- **yfinance**: P/L, P/VPA, EV/EBITDA, ROE, Margem Líquida, ROA,
-  Dívida/PL, Liquidez Corrente, Dividend Yield, Payout.
-  Brazilian tickers require the ``.SA`` suffix on Yahoo Finance
+- **Fundamentus** (primary): P/L, P/VP, EV/EBITDA, EV/EBIT, ROE, ROA, ROIC,
+  Margem Líquida, Margem Bruta, Margem EBIT, Dívida/PL, Liquidez Corrente,
+  Dividend Yield, Cotação, P/EBIT, and more.
+  Scraped from ``https://www.fundamentus.com.br/detalhes.php?papel=<TICKER>``.
+
+- **yfinance** (fallback / supplement): Fields not available in Fundamentus
+  (e.g. Payout).  Brazilian tickers require the ``.SA`` suffix on Yahoo Finance
   (e.g. ``PETR4`` → ``PETR4.SA``).
 
 - **mercados.bcb**: Selic meta (taxa alvo anual) and IPCA 12-month
@@ -15,11 +19,12 @@ Data sources
 
 - **mercados.b3**: FII dividend history for real estate investment
   funds.  Used to compute the 12-month Dividend Yield for FIIs
-  when the yfinance value is missing or zero.
+  when neither Fundamentus nor yfinance provides a usable value.
 """
 
 import datetime
 import logging
+import re
 from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -41,32 +46,209 @@ _YF_FIELD_MAP: Dict[str, tuple] = {
     "payoutRatio":        ("payout",            "Payout"),
 }
 
+# ---------------------------------------------------------------------------
+# Fundamentus scraping
+# ---------------------------------------------------------------------------
+
+_FUNDAMENTUS_BASE_URL = "https://www.fundamentus.com.br/detalhes.php"
+
+# Mapping from Fundamentus page label → (internal_key, portuguese_label, is_pct)
+# is_pct=True means the value is expressed as a percentage on the page and
+# must be divided by 100 to match the yfinance decimal convention.
+_FUNDAMENTUS_FIELD_MAP: Dict[str, tuple] = {
+    "P/L":                ("pl",                "P/L",               False),
+    "P/VP":               ("pvpa",              "P/VPA",             False),
+    "P/EBIT":             ("p_ebit",            "P/EBIT",            False),
+    "EV/EBIT":            ("ev_ebit",           "EV/EBIT",           False),
+    "EV/EBITDA":          ("ev_ebitda",         "EV/EBITDA",         False),
+    "PSR":                ("psr",               "PSR",               False),
+    "P/Ativo":            ("p_ativo",           "P/Ativo",           False),
+    "P/Cap. Giro":        ("p_cap_giro",        "P/Cap. Giro",       False),
+    "P/Ativ Circ Liq":    ("p_ativ_circ_liq",  "P/Ativ Circ Liq",   False),
+    "Div. Yield":         ("dy",                "Dividend Yield",    True),
+    "ROE":                ("roe",               "ROE",               True),
+    "ROIC":               ("roic",              "ROIC",              True),
+    "ROA":                ("roa",               "ROA",               True),
+    "Giro Ativos":        ("giro_ativos",       "Giro Ativos",       False),
+    "Marg. Bruta":        ("margem_bruta",      "Margem Bruta",      True),
+    "Marg. EBIT":         ("margem_ebit",       "Margem EBIT",       True),
+    "Marg. Líquida":      ("margem_liquida",    "Margem Líquida",    True),
+    "Liq. Corr.":         ("liquidez_corrente", "Liquidez Corrente", False),
+    "Dív. Bruta/Patrim.": ("divida_pl",         "Dívida/PL",         False),
+    "Cresc. Rec. 5a.":    ("cresc_receita_5a",  "Cresc. Rec. 5a.",   True),
+    "Cotação":            ("preco",             "Cotação",           False),
+}
+
+_FUNDAMENTUS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.fundamentus.com.br/",
+}
+
+
+def _parse_br_number(text: str) -> Optional[float]:
+    """
+    Parse a Brazilian-formatted number string into a Python float.
+
+    Handles formats like ``"1.234,56"``, ``"12,34%"``, ``"-0,45%"``,
+    ``"(1.234,56)"``.  Returns ``None`` when the value cannot be parsed
+    (e.g. ``"-"`` or empty string).
+
+    Args:
+        text: Raw text extracted from a Fundamentus HTML cell.
+
+    Returns:
+        Float value or ``None``.
+    """
+    if not text:
+        return None
+    t = text.strip()
+    if not t or t == "-":
+        return None
+    # Remove % sign and leading/trailing whitespace
+    t = t.replace("%", "").strip()
+    # Handle parentheses notation for negative numbers: (1.234,56) → -1234.56
+    if t.startswith("(") and t.endswith(")"):
+        t = "-" + t[1:-1]
+    # Brazilian format: dot = thousands separator, comma = decimal
+    t = t.replace(".", "").replace(",", ".")
+    # Remove any leftover non-numeric characters except leading minus and dot
+    t = re.sub(r"[^\d\.\-]", "", t)
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def fetch_fundamentus_data(ticker: str) -> List[Dict]:
+    """
+    Scrape fundamental indicators for a single B3 ticker from Fundamentus.
+
+    Fetches ``https://www.fundamentus.com.br/detalhes.php?papel=<TICKER>``
+    and extracts all recognised label/value pairs from the HTML tables.
+
+    Args:
+        ticker: B3 ticker code without suffix (e.g. ``"PETR4"``).
+
+    Returns:
+        List of indicator dicts (same schema as
+        :func:`fetch_asset_fundamentals`).  Returns an empty list when the
+        ticker is not found on Fundamentus or when the request fails.
+    """
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as exc:
+        logger.error("Missing dependency for Fundamentus scraping: %s", exc)
+        return []
+
+    url = f"{_FUNDAMENTUS_BASE_URL}?papel={ticker}"
+    try:
+        resp = requests.get(url, headers=_FUNDAMENTUS_HEADERS, timeout=15)
+        resp.raise_for_status()
+        # Fundamentus serves ISO-8859-1 / latin-1 encoded pages
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    except Exception as exc:
+        logger.warning("Fundamentus request failed for %s: %s", ticker, exc)
+        return []
+
+    try:
+        soup = BeautifulSoup(resp.text, "html.parser")
+    except Exception as exc:
+        logger.warning("Failed to parse Fundamentus HTML for %s: %s", ticker, exc)
+        return []
+
+    # Extract all label → value pairs from the page tables.
+    # Fundamentus lays the page out as tables where adjacent <td> elements
+    # alternate between label and value within each row.
+    raw_data: Dict[str, str] = {}
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = row.find_all("td")
+            # Cells alternate: label, value, [label, value, ...]
+            for i in range(0, len(cells) - 1, 2):
+                label = cells[i].get_text(strip=True).rstrip("?").strip()
+                value = cells[i + 1].get_text(strip=True)
+                if label and value:
+                    raw_data[label] = value
+
+    if not raw_data:
+        logger.debug("No data extracted from Fundamentus for %s", ticker)
+        return []
+
+    today = datetime.date.today().isoformat()
+    results: List[Dict] = []
+    for fund_label, (internal_key, label, is_pct) in _FUNDAMENTUS_FIELD_MAP.items():
+        raw = raw_data.get(fund_label)
+        if raw is None:
+            continue
+        value = _parse_br_number(raw)
+        if value is None:
+            continue
+        if is_pct:
+            value = round(value / 100.0, 6)
+        results.append({
+            "ticker":     ticker,
+            "key":        internal_key,
+            "value":      value,
+            "label":      label,
+            "updated_at": today,
+        })
+
+    logger.info(
+        "Fetched %d fundamental indicators for %s via Fundamentus",
+        len(results),
+        ticker,
+    )
+    return results
+
 
 # ---------------------------------------------------------------------------
-# yfinance helpers
+# Primary fetch: Fundamentus + yfinance supplement
 # ---------------------------------------------------------------------------
 
 def fetch_asset_fundamentals(ticker: str) -> List[Dict]:
     """
-    Fetch fundamental indicators for a single B3 ticker via yfinance.
+    Fetch fundamental indicators for a single B3 ticker.
 
-    The ticker is automatically suffixed with ``.SA`` when querying
-    Yahoo Finance (e.g. ``PETR4`` → ``PETR4.SA``).
+    **Fundamentus** is queried first as the primary source.  Any keys not
+    returned by Fundamentus are then supplemented using **yfinance** (e.g.
+    Payout ratio, which Fundamentus does not publish).
+
+    The ticker is automatically suffixed with ``.SA`` when querying Yahoo
+    Finance (e.g. ``PETR4`` → ``PETR4.SA``).
 
     Args:
         ticker: B3 ticker code without the ``.SA`` suffix.
 
     Returns:
         List of dicts with keys ``ticker``, ``key``, ``value``,
-        ``label``, ``updated_at``.  Returns an empty list when the
-        ticker is not found on Yahoo Finance or when yfinance returns
-        no usable data.
+        ``label``, ``updated_at``.  Returns an empty list only when both
+        Fundamentus and yfinance return no usable data.
     """
+    # --- Step 1: Fundamentus (primary) ----------------------------------------
+    results = fetch_fundamentus_data(ticker)
+    covered_keys = {r["key"] for r in results}
+
+    # --- Step 2: yfinance supplement for missing keys -------------------------
+    missing_yf_keys = {
+        yf_key: (internal_key, label)
+        for yf_key, (internal_key, label) in _YF_FIELD_MAP.items()
+        if internal_key not in covered_keys
+    }
+
+    if not missing_yf_keys:
+        return results
+
     try:
         import yfinance as yf
     except ImportError:
         logger.error("yfinance not installed — run: pip install yfinance")
-        return []
+        return results
 
     yf_symbol = f"{ticker}.SA"
     today = datetime.date.today().isoformat()
@@ -75,15 +257,13 @@ def fetch_asset_fundamentals(ticker: str) -> List[Dict]:
         info = yf.Ticker(yf_symbol).info
     except Exception as exc:
         logger.warning("yfinance error for %s: %s", yf_symbol, exc)
-        return []
+        return results
 
-    # An empty or minimal response means the ticker was not found
     if not info or info.get("quoteType") is None:
         logger.debug("No yfinance data for %s", yf_symbol)
-        return []
+        return results
 
-    results: List[Dict] = []
-    for yf_key, (internal_key, label) in _YF_FIELD_MAP.items():
+    for yf_key, (internal_key, label) in missing_yf_keys.items():
         raw = info.get(yf_key)
         if raw is None:
             continue
@@ -100,7 +280,7 @@ def fetch_asset_fundamentals(ticker: str) -> List[Dict]:
         })
 
     logger.info(
-        "Fetched %d fundamental indicators for %s via yfinance",
+        "Fetched %d fundamental indicators for %s (Fundamentus + yfinance)",
         len(results),
         ticker,
     )

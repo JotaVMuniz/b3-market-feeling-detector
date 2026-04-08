@@ -12,8 +12,11 @@ import pytest
 
 from src.market_data.fetch_fundamentals import (
     _YF_FIELD_MAP,
+    _FUNDAMENTUS_FIELD_MAP,
     _is_fii_ticker,
+    _parse_br_number,
     fetch_asset_fundamentals,
+    fetch_fundamentus_data,
     fetch_fii_dy_supplement,
     fetch_fundamentals_for_tickers,
     fetch_macro_fundamentals,
@@ -39,6 +42,138 @@ def sample_fund_records():
         {"ticker": "PETR4", "key": "roe",      "value": 0.25,  "label": "ROE",      "updated_at": today},
         {"ticker": "PETR4", "key": "dy",       "value": 0.08,  "label": "Dividend Yield", "updated_at": today},
     ]
+
+
+# ---------------------------------------------------------------------------
+# _parse_br_number
+# ---------------------------------------------------------------------------
+
+class TestParseBrNumber:
+    def test_integer(self):
+        assert _parse_br_number("42") == pytest.approx(42.0)
+
+    def test_decimal_comma(self):
+        assert _parse_br_number("1,23") == pytest.approx(1.23)
+
+    def test_thousands_dot_decimal_comma(self):
+        assert _parse_br_number("1.234,56") == pytest.approx(1234.56)
+
+    def test_percentage_stripped(self):
+        assert _parse_br_number("12,34%") == pytest.approx(12.34)
+
+    def test_negative(self):
+        assert _parse_br_number("-5,67") == pytest.approx(-5.67)
+
+    def test_parentheses_negative(self):
+        assert _parse_br_number("(1.000,00)") == pytest.approx(-1000.0)
+
+    def test_dash_returns_none(self):
+        assert _parse_br_number("-") is None
+
+    def test_empty_returns_none(self):
+        assert _parse_br_number("") is None
+
+    def test_none_like_returns_none(self):
+        assert _parse_br_number(None) is None  # type: ignore
+
+
+# ---------------------------------------------------------------------------
+# fetch_fundamentus_data
+# ---------------------------------------------------------------------------
+
+_SAMPLE_FUNDAMENTUS_HTML = """
+<html><body>
+<table>
+  <tr>
+    <td>Papel</td><td>PETR4</td>
+    <td>Cotação</td><td>38,50</td>
+  </tr>
+  <tr>
+    <td>P/L</td><td>6,20</td>
+    <td>P/VP</td><td>1,10</td>
+  </tr>
+  <tr>
+    <td>EV/EBITDA</td><td>4,50</td>
+    <td>EV/EBIT</td><td>5,30</td>
+  </tr>
+  <tr>
+    <td>Div. Yield</td><td>8,40%</td>
+    <td>ROE</td><td>22,50%</td>
+  </tr>
+  <tr>
+    <td>ROA</td><td>7,10%</td>
+    <td>Marg. Líquida</td><td>15,20%</td>
+  </tr>
+  <tr>
+    <td>Liq. Corr.</td><td>1,80</td>
+    <td>Dív. Bruta/Patrim.</td><td>0,85</td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
+class TestFetchFundamentusData:
+    def _mock_response(self, html: str, status: int = 200):
+        mock_resp = MagicMock()
+        mock_resp.status_code = status
+        mock_resp.text = html
+        mock_resp.apparent_encoding = "utf-8"
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    @patch("requests.get")
+    def test_extracts_known_fields(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        result = fetch_fundamentus_data("PETR4")
+        keys = {r["key"] for r in result}
+        assert "pl" in keys
+        assert "pvpa" in keys
+        assert "ev_ebitda" in keys
+        assert "dy" in keys
+        assert "roe" in keys
+
+    @patch("requests.get")
+    def test_percentages_divided_by_100(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        result = fetch_fundamentus_data("PETR4")
+        dy = next(r for r in result if r["key"] == "dy")
+        # 8,40% → 0.0840
+        assert dy["value"] == pytest.approx(0.084, rel=1e-3)
+
+    @patch("requests.get")
+    def test_non_percentage_not_divided(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        result = fetch_fundamentus_data("PETR4")
+        pl = next(r for r in result if r["key"] == "pl")
+        assert pl["value"] == pytest.approx(6.20, rel=1e-3)
+
+    @patch("requests.get")
+    def test_ticker_in_each_record(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        result = fetch_fundamentus_data("PETR4")
+        assert all(r["ticker"] == "PETR4" for r in result)
+
+    @patch("requests.get")
+    def test_request_exception_returns_empty(self, mock_get):
+        mock_get.side_effect = OSError("network error")
+        result = fetch_fundamentus_data("PETR4")
+        assert result == []
+
+    @patch("requests.get")
+    def test_http_error_returns_empty(self, mock_get):
+        mock_resp = self._mock_response("", 404)
+        import requests as req_mod
+        mock_resp.raise_for_status.side_effect = req_mod.HTTPError("404")
+        mock_get.return_value = mock_resp
+        result = fetch_fundamentus_data("PETR4")
+        assert result == []
+
+    @patch("requests.get")
+    def test_empty_page_returns_empty(self, mock_get):
+        mock_get.return_value = self._mock_response("<html><body></body></html>")
+        result = fetch_fundamentus_data("PETR4")
+        assert result == []
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +220,9 @@ class TestFetchAssetFundamentals:
         base.update(overrides)
         return base
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_returns_all_mapped_fields(self, mock_ticker_cls):
+    def test_returns_all_mapped_fields(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = self._make_yf_info()
         result = fetch_asset_fundamentals("PETR4")
         keys = {r["key"] for r in result}
@@ -94,26 +230,30 @@ class TestFetchAssetFundamentals:
         expected = {v[0] for v in _YF_FIELD_MAP.values()}
         assert expected == keys
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_ticker_sa_suffix(self, mock_ticker_cls):
+    def test_ticker_sa_suffix(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = self._make_yf_info()
         fetch_asset_fundamentals("VALE3")
         mock_ticker_cls.assert_called_once_with("VALE3.SA")
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_empty_info_returns_empty_list(self, mock_ticker_cls):
+    def test_empty_info_returns_empty_list(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = {}
         result = fetch_asset_fundamentals("PETR4")
         assert result == []
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_none_quote_type_returns_empty_list(self, mock_ticker_cls):
+    def test_none_quote_type_returns_empty_list(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = {"quoteType": None}
         result = fetch_asset_fundamentals("PETR4")
         assert result == []
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_missing_fields_skipped(self, mock_ticker_cls):
+    def test_missing_fields_skipped(self, mock_ticker_cls, _mock_fund):
         # Only P/L provided
         mock_ticker_cls.return_value.info = {"quoteType": "EQUITY", "trailingPE": 10.0}
         result = fetch_asset_fundamentals("PETR4")
@@ -121,8 +261,9 @@ class TestFetchAssetFundamentals:
         assert result[0]["key"] == "pl"
         assert result[0]["value"] == 10.0
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_non_numeric_field_skipped(self, mock_ticker_cls):
+    def test_non_numeric_field_skipped(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = {
             "quoteType": "EQUITY",
             "trailingPE": "N/A",
@@ -133,8 +274,9 @@ class TestFetchAssetFundamentals:
         assert "pl" not in keys
         assert "pvpa" in keys
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_record_structure(self, mock_ticker_cls):
+    def test_record_structure(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = {"quoteType": "EQUITY", "trailingPE": 7.0}
         result = fetch_asset_fundamentals("ITSA4")
         assert len(result) == 1
@@ -145,8 +287,9 @@ class TestFetchAssetFundamentals:
         assert rec["label"] == "P/L"
         assert "updated_at" in rec
 
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[])
     @patch("yfinance.Ticker")
-    def test_yfinance_exception_returns_empty(self, mock_ticker_cls):
+    def test_yfinance_exception_returns_empty(self, mock_ticker_cls, _mock_fund):
         mock_ticker_cls.return_value.info = property(lambda self: (_ for _ in ()).throw(RuntimeError("timeout")))
         # Simulate exception on .info access
         mock_ticker_cls.return_value = MagicMock()
@@ -165,8 +308,31 @@ class TestFetchAssetFundamentals:
             return real_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=mock_import):
-            result = fetch_asset_fundamentals("PETR4")
+            with patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data", return_value=[]):
+                result = fetch_asset_fundamentals("PETR4")
         assert result == []
+
+    @patch("src.market_data.fetch_fundamentals.fetch_fundamentus_data")
+    def test_fundamentus_data_used_when_available(self, mock_fund):
+        """Fundamentus results are returned without calling yfinance."""
+        today = datetime.date.today().isoformat()
+        mock_fund.return_value = [
+            {"ticker": "PETR4", "key": "pl",  "value": 5.0, "label": "P/L",  "updated_at": today},
+            {"ticker": "PETR4", "key": "pvpa", "value": 1.1, "label": "P/VPA","updated_at": today},
+        ]
+        with patch("yfinance.Ticker") as mock_yf:
+            # yfinance should only be called for keys NOT in Fundamentus data
+            mock_yf.return_value.info = {"quoteType": "EQUITY"}
+            result = fetch_asset_fundamentals("PETR4")
+
+        keys = {r["key"] for r in result}
+        assert "pl" in keys
+        assert "pvpa" in keys
+        # yfinance was called (for missing keys like payout) but Fundamentus
+        # values take precedence
+        pl_rows = [r for r in result if r["key"] == "pl"]
+        assert len(pl_rows) == 1
+        assert pl_rows[0]["value"] == 5.0
 
 
 # ---------------------------------------------------------------------------

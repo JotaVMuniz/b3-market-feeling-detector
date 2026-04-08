@@ -117,6 +117,13 @@ CREATE INDEX IF NOT EXISTS idx_asset_fundamentals_ticker
 ON asset_fundamentals(ticker)
 """
 
+_CREATE_IBRX_TICKERS = """
+CREATE TABLE IF NOT EXISTS ibrx_tickers (
+    ticker     TEXT PRIMARY KEY,
+    updated_at TEXT NOT NULL
+)
+"""
+
 
 class MarketDatabase:
     """Manages market-data tables inside the shared news.db database."""
@@ -158,6 +165,7 @@ class MarketDatabase:
                     _CREATE_IDX_SENTIMENT_INDICATORS_DATE,
                     _CREATE_ASSET_FUNDAMENTALS,
                     _CREATE_IDX_ASSET_FUNDAMENTALS_TICKER,
+                    _CREATE_IBRX_TICKERS,
                 ):
                     cursor.execute(stmt)
             logger.info("Market-data tables initialised")
@@ -769,3 +777,59 @@ class MarketDatabase:
                 f"Error fetching fundamentals updated_at for {ticker}: {exc}"
             )
             return None
+
+    # ------------------------------------------------------------------
+    # ibrx_tickers
+    # ------------------------------------------------------------------
+
+    def upsert_ibrx_tickers(self, tickers: List[str], updated_at: str) -> int:
+        """
+        Replace the stored IBrX 100 ticker list with *tickers*.
+
+        Existing rows are deleted first so the table always reflects the
+        current index composition exactly.
+
+        Args:
+            tickers:    List of B3 ticker codes.
+            updated_at: ISO date string (``YYYY-MM-DD``) of the fetch date.
+
+        Returns:
+            Number of rows written.
+        """
+        if not tickers:
+            return 0
+        written = 0
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM ibrx_tickers")
+                for ticker in tickers:
+                    cursor.execute(
+                        "INSERT OR REPLACE INTO ibrx_tickers (ticker, updated_at) "
+                        "VALUES (?, ?)",
+                        (ticker, updated_at),
+                    )
+                    written += 1
+            logger.info("Stored %d IBrX 100 tickers in ibrx_tickers", written)
+        except Exception as exc:
+            logger.error("Error upserting IBrX 100 tickers: %s", exc)
+        return written
+
+    def get_ibrx_tickers(self) -> List[str]:
+        """
+        Return the stored IBrX 100 ticker list ordered alphabetically.
+
+        Returns an empty list when the table has never been populated (i.e.
+        ``run_ibrx_tickers`` has not been executed yet for this database).
+
+        Returns:
+            List of B3 ticker codes.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT ticker FROM ibrx_tickers ORDER BY ticker")
+                return [row["ticker"] for row in cursor.fetchall()]
+        except Exception as exc:
+            logger.error("Error fetching IBrX 100 tickers: %s", exc)
+            return []

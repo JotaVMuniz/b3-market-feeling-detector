@@ -71,6 +71,7 @@ from src.market_data.fetch_fundamentals import (
     fetch_fundamentals_for_tickers,
     fetch_macro_fundamentals,
 )
+from src.market_data.fetch_ibrx import fetch_ibrx100_tickers
 from src.market_data.compute_composite_index import (
     compute_composite_index,
     indicators_to_raw_records,
@@ -317,6 +318,34 @@ def run_trusted(reprocess_all: bool = False) -> None:
     logger.info("Stage TRUSTED complete\n")
 
 
+def run_ibrx_tickers() -> List[str]:
+    """
+    Fetch and persist the current IBrX 100 ticker list.
+
+    This stage should be executed **first**, before any data-fetching
+    stage, so the pipeline scope is established upfront.  The ticker
+    list is written to the ``ibrx_tickers`` database table and returned
+    for immediate use within the same process.
+
+    Returns:
+        List of B3 ticker codes that compose the IBrX 100 index.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: IBRX — fetching IBrX 100 ticker universe")
+    logger.info("=" * 60)
+
+    tickers = fetch_ibrx100_tickers()
+    logger.info("IBrX 100 universe: %d tickers", len(tickers))
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+    today = datetime.date.today().isoformat()
+    market_db.upsert_ibrx_tickers(tickers, updated_at=today)
+
+    logger.info("Stage IBRX complete\n")
+    return tickers
+
+
 def run_prices(
     tickers: Optional[List[str]] = None,
     dates: Optional[List[datetime.date]] = None,
@@ -355,9 +384,17 @@ def run_prices(
         _all_news = db.get_all_news()
 
     if tickers is None:
-        tickers_set = _collect_tickers_from_news(_all_news)
-        tickers_set.update(market_db.get_known_tickers())
-        tickers = list(tickers_set)
+        # Priority: IBrX 100 universe stored in DB → news mentions → companies
+        ibrx = market_db.get_ibrx_tickers()
+        if ibrx:
+            logger.info(
+                "Using IBrX 100 universe (%d tickers) as price scope", len(ibrx)
+            )
+            tickers = ibrx
+        else:
+            tickers_set = _collect_tickers_from_news(_all_news)
+            tickers_set.update(market_db.get_known_tickers())
+            tickers = list(tickers_set)
 
     if not tickers:
         logger.warning("No tickers found — skipping PRICES stage")
@@ -607,12 +644,13 @@ def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
 
     For FIIs (tickers ending in ``11``), the stage also tries to
     supplement the Dividend Yield using live dividend data from
-    **mercados.b3** when yfinance does not return a value.
+    **mercados.b3** when neither Fundamentus nor yfinance provides a value.
 
     Args:
         tickers: Explicit list of B3 ticker codes to update.  When
-                 ``None`` every ticker in the ``companies`` table is
-                 used.
+                 ``None`` the IBrX 100 universe stored in the database is
+                 used (populated by :func:`run_ibrx_tickers`).  Falls back
+                 to tickers with price data when the IBrX list is empty.
     """
     logger.info("=" * 60)
     logger.info("Stage: FUNDAMENTALS — fetching fundamental indicators")
@@ -621,17 +659,24 @@ def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
     db = NewsDatabase()
     market_db = MarketDatabase(db_path=db.db_path)
 
-    # Resolve ticker list — use only tickers with actual price data so we
-    # don't query Yahoo Finance for NLP-extracted codes that are not real
-    # B3 tickers (e.g. codes like "ITSAF130" that come from the companies
-    # table but have no .SA equivalent on Yahoo Finance).
+    # Resolve ticker list:
+    # 1. IBrX 100 universe (ideal — pre-fetched by run_ibrx_tickers)
+    # 2. Tickers with actual price data (reliable fallback)
     if tickers is None:
-        tickers = list(market_db.get_tickers_with_prices())
+        ibrx = market_db.get_ibrx_tickers()
+        if ibrx:
+            logger.info(
+                "Using IBrX 100 universe (%d tickers) as fundamentals scope",
+                len(ibrx),
+            )
+            tickers = ibrx
+        else:
+            tickers = list(market_db.get_tickers_with_prices())
 
     if not tickers:
         logger.warning("No tickers found — skipping FUNDAMENTALS stage")
     else:
-        logger.info("Fetching fundamentals for %d tickers via yfinance", len(tickers))
+        logger.info("Fetching fundamentals for %d tickers (Fundamentus + yfinance)", len(tickers))
         fund_records = fetch_fundamentals_for_tickers(tickers)
 
         # FII DY supplement via mercados.b3
@@ -724,7 +769,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> fundamentals -> analytics)")
+    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> ibrx -> prices -> indicators -> fundamentals -> analytics)")
     logger.info("=" * 60)
 
     try:
@@ -733,6 +778,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         run_trusted(reprocess_all=reprocess_existing)
         run_cleanup()
         if fetch_market_data:
+            run_ibrx_tickers()
             run_prices()
             run_indicators()
             run_fundamentals()
@@ -762,6 +808,7 @@ Examples:
   python main.py --stage trusted
   python main.py --stage trusted --reprocess-existing
   python main.py --stage cleanup
+  python main.py --stage ibrx
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage indicators
@@ -778,7 +825,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'fundamentals', 'all'],
+        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'fundamentals', 'ibrx', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -857,6 +904,8 @@ Examples:
         run_analytics()
     elif args.stage == 'fundamentals':
         run_fundamentals(tickers=_tickers_arg)
+    elif args.stage == 'ibrx':
+        run_ibrx_tickers()
     elif args.stage == 'backfill':
         run_backfill(start_date=_from_date, end_date=_to_date)
     else:  # 'all'
