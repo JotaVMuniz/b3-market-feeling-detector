@@ -67,6 +67,10 @@ from src.market_data.fetch_sentiment_indicators import (
     fetch_market_indicators_range,
     fetch_bcb_indicators,
 )
+from src.market_data.fetch_fundamentals import (
+    fetch_fundamentals_for_tickers,
+    fetch_macro_fundamentals,
+)
 from src.market_data.compute_composite_index import (
     compute_composite_index,
     indicators_to_raw_records,
@@ -586,6 +590,78 @@ def run_indicators(
         )
 
     logger.info("Stage INDICATORS complete\n")
+
+
+def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
+    """
+    Stage 5 – Fundamentals: fetch fundamental indicators for tracked assets.
+
+    Fetches per-asset fundamental data (P/L, P/VPA, EV/EBITDA, ROE,
+    Margem Líquida, ROA, Dívida/PL, Liquidez Corrente, Dividend Yield,
+    Payout) via **yfinance** for every known B3 ticker, and stores the
+    results in the ``asset_fundamentals`` table.
+
+    Additionally fetches macroeconomic context (Selic meta, IPCA 12m)
+    from **mercados.bcb** and stores it under the special ticker
+    ``"__MACRO__"``.
+
+    For FIIs (tickers ending in ``11``), the stage also tries to
+    supplement the Dividend Yield using live dividend data from
+    **mercados.b3** when yfinance does not return a value.
+
+    Args:
+        tickers: Explicit list of B3 ticker codes to update.  When
+                 ``None`` every ticker in the ``companies`` table is
+                 used.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: FUNDAMENTALS — fetching fundamental indicators")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+
+    # Resolve ticker list
+    if tickers is None:
+        tickers = list(market_db.get_known_tickers())
+
+    if not tickers:
+        logger.warning("No tickers found — skipping FUNDAMENTALS stage")
+    else:
+        logger.info("Fetching fundamentals for %d tickers via yfinance", len(tickers))
+        fund_records = fetch_fundamentals_for_tickers(tickers)
+
+        # FII DY supplement via mercados.b3
+        from src.market_data.fetch_fundamentals import (
+            _is_fii_ticker,
+            fetch_fii_dy_supplement,
+        )
+        existing_dy = {r["ticker"] for r in fund_records if r["key"] == "dy"}
+        for ticker in tickers:
+            if _is_fii_ticker(ticker) and ticker not in existing_dy:
+                price_rows = market_db.get_prices_for_ticker(
+                    ticker,
+                    (datetime.date.today() - datetime.timedelta(days=7)).isoformat(),
+                    datetime.date.today().isoformat(),
+                )
+                current_price = price_rows[-1]["close"] if price_rows else None
+                supplement = fetch_fii_dy_supplement(ticker, current_price)
+                if supplement:
+                    fund_records.append(supplement)
+
+        written = market_db.upsert_fundamentals(fund_records)
+        logger.info("Stored %d fundamental records in asset_fundamentals", written)
+
+    # Macro indicators (Selic, IPCA) — always fetched
+    macro_records = fetch_macro_fundamentals()
+    if macro_records:
+        written_macro = market_db.upsert_fundamentals(macro_records)
+        logger.info(
+            "Stored %d macro fundamental records in asset_fundamentals",
+            written_macro,
+        )
+
+    logger.info("Stage FUNDAMENTALS complete\n")
 
 
 def run_analytics() -> None:

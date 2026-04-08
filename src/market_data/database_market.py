@@ -101,6 +101,22 @@ CREATE INDEX IF NOT EXISTS idx_sentiment_indicators_date
 ON sentiment_indicators(date)
 """
 
+_CREATE_ASSET_FUNDAMENTALS = """
+CREATE TABLE IF NOT EXISTS asset_fundamentals (
+    ticker     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      REAL,
+    label      TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (ticker, key)
+)
+"""
+
+_CREATE_IDX_ASSET_FUNDAMENTALS_TICKER = """
+CREATE INDEX IF NOT EXISTS idx_asset_fundamentals_ticker
+ON asset_fundamentals(ticker)
+"""
+
 
 class MarketDatabase:
     """Manages market-data tables inside the shared news.db database."""
@@ -140,6 +156,8 @@ class MarketDatabase:
                     _CREATE_SENTIMENT_INDICATORS,
                     _CREATE_COMPOSITE_SENTIMENT_INDEX,
                     _CREATE_IDX_SENTIMENT_INDICATORS_DATE,
+                    _CREATE_ASSET_FUNDAMENTALS,
+                    _CREATE_IDX_ASSET_FUNDAMENTALS_TICKER,
                 ):
                     cursor.execute(stmt)
             logger.info("Market-data tables initialised")
@@ -641,3 +659,95 @@ class MarketDatabase:
         except Exception as exc:
             logger.error(f"Error fetching composite index: {exc}")
             return []
+
+    # ------------------------------------------------------------------
+    # asset_fundamentals
+    # ------------------------------------------------------------------
+
+    def upsert_fundamentals(self, records: List[Dict]) -> int:
+        """
+        Insert or replace rows in ``asset_fundamentals``.
+
+        Args:
+            records: Dicts with keys ``ticker``, ``key``, ``value``,
+                ``label``, ``updated_at``.
+
+        Returns:
+            Number of rows written.
+        """
+        if not records:
+            return 0
+
+        written = 0
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for rec in records:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO asset_fundamentals
+                            (ticker, key, value, label, updated_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            rec.get("ticker"),
+                            rec.get("key"),
+                            rec.get("value"),
+                            rec.get("label"),
+                            rec.get("updated_at"),
+                        ),
+                    )
+                    written += 1
+            logger.info(f"Upserted {written} fundamental records")
+        except Exception as exc:
+            logger.error(f"Error upserting fundamentals: {exc}")
+        return written
+
+    def get_fundamentals(self, ticker: str) -> List[Dict]:
+        """
+        Return all stored fundamental indicator rows for *ticker*.
+
+        Args:
+            ticker: B3 ticker code or ``"__MACRO__"`` for macro indicators.
+
+        Returns:
+            List of fundamental dicts ordered by key.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM asset_fundamentals WHERE ticker = ? ORDER BY key",
+                    (ticker,),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as exc:
+            logger.error(f"Error fetching fundamentals for {ticker}: {exc}")
+            return []
+
+    def get_fundamentals_updated_at(self, ticker: str) -> Optional[str]:
+        """
+        Return the most recent ``updated_at`` value for *ticker*'s
+        fundamental data, or ``None`` when no data is stored.
+
+        Args:
+            ticker: B3 ticker code.
+
+        Returns:
+            ISO date string or ``None``.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT MAX(updated_at) AS latest FROM asset_fundamentals "
+                    "WHERE ticker = ?",
+                    (ticker,),
+                )
+                row = cursor.fetchone()
+                return row["latest"] if row and row["latest"] else None
+        except Exception as exc:
+            logger.error(
+                f"Error fetching fundamentals updated_at for {ticker}: {exc}"
+            )
+            return None
