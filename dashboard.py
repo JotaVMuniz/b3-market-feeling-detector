@@ -866,15 +866,32 @@ def _render_asset_tab():
     st.divider()
     st.subheader(f"📰 Notícias sobre {selected}")
 
-    def _render_news_rows(df: pd.DataFrame, max_rows: int = 30) -> None:
+    def _render_news_rows(df: pd.DataFrame, max_rows: int = 30, use_expander: bool = True) -> None:
         for _, row in df.head(max_rows).iterrows():
             pub = row["published_at"].strftime("%Y-%m-%d") if pd.notna(row["published_at"]) else "N/A"
             sent = row.get("sentiment", "neutro") or "neutro"
             color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
-            with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+            if use_expander:
+                with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(row.get("content") or "")
+                        st.markdown(f"[🔗 Leia mais]({row['url']})")
+                    with col2:
+                        st.markdown(f"**Sentimento:** {sent}")
+                        conf = row.get("confidence", 0)
+                        if conf:
+                            st.markdown(f"**Confiança:** {conf:.2f}")
+                        segs = row.get("segments", [])
+                        if segs:
+                            st.markdown(f"**Segmentos:** {', '.join(segs)}")
+            else:
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.markdown(row.get("content") or "")
+                    st.markdown(f"{color} **{row['title']}** — {row['source']} ({pub})")
+                    content = row.get("content") or ""
+                    if content:
+                        st.caption(content[:200] + ("…" if len(content) > 200 else ""))
                     st.markdown(f"[🔗 Leia mais]({row['url']})")
                 with col2:
                     st.markdown(f"**Sentimento:** {sent}")
@@ -884,6 +901,7 @@ def _render_asset_tab():
                     segs = row.get("segments", [])
                     if segs:
                         st.markdown(f"**Segmentos:** {', '.join(segs)}")
+                st.divider()
 
     if news_df.empty:
         st.info("Nenhuma notícia encontrada para este ativo no período.")
@@ -911,7 +929,7 @@ def _render_asset_tab():
                 seg_sentiment = compute_asset_sentiment(seg_df)
                 if seg_sentiment["count"] > 0:
                     _render_sentiment_indicator(seg_sentiment)
-                _render_news_rows(seg_df, max_rows=20)
+                _render_news_rows(seg_df, max_rows=20, use_expander=False)
     else:
         st.caption("ℹ️ Nenhum segmento identificado para este ativo com base nas notícias disponíveis.")
 
