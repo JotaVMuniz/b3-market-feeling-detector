@@ -721,7 +721,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics)")
+    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> fundamentals -> analytics)")
     logger.info("=" * 60)
 
     try:
@@ -732,6 +732,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         if fetch_market_data:
             run_prices()
             run_indicators()
+            run_fundamentals()
             run_analytics()
 
         logger.info("=" * 60)
@@ -762,6 +763,8 @@ Examples:
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage indicators
   python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
+  python main.py --stage fundamentals
+  python main.py --stage fundamentals --tickers PETR4,VALE3
   python main.py --stage analytics
   python main.py --stage backfill
   python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
@@ -772,7 +775,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
+        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'fundamentals', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -794,7 +797,7 @@ Examples:
         type=str,
         default=None,
         metavar='TICKER1,TICKER2',
-        help='Comma-separated tickers for the prices stage.',
+        help='Comma-separated tickers for the prices and fundamentals stages.',
     )
     parser.add_argument(
         '--date',
@@ -849,6 +852,8 @@ Examples:
         run_indicators(start_date=_from_date, end_date=_to_date)
     elif args.stage == 'analytics':
         run_analytics()
+    elif args.stage == 'fundamentals':
+        run_fundamentals(tickers=_tickers_arg)
     elif args.stage == 'backfill':
         run_backfill(start_date=_from_date, end_date=_to_date)
     else:  # 'all'

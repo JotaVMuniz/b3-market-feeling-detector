@@ -261,18 +261,18 @@ def fetch_fii_dy_supplement(
         if annual_income <= 0:
             return None
 
-        dy = round(annual_income / current_price * 100, 2)
+        dy = round(annual_income / current_price, 4)
         logger.info(
             "FII DY supplement for %s: annual_income=%.4f price=%.2f DY=%.2f%%",
             ticker,
             annual_income,
             current_price,
-            dy,
+            dy * 100,
         )
         return {
             "ticker":     ticker,
             "key":        "dy",
-            "value":      dy / 100,  # store as decimal to match yfinance convention
+            "value":      dy,  # stored as decimal to match yfinance convention
             "label":      "Dividend Yield",
             "updated_at": today.isoformat(),
         }
