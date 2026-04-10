@@ -81,51 +81,54 @@ class TestParseBrNumber:
 # fetch_fundamentus_data
 # ---------------------------------------------------------------------------
 
-# Simulates the real Fundamentus page structure with class="label"/class="data"
+# Simulates the real Fundamentus page structure with class="label"/class="data".
+# Labels have a leading '?' (tooltip icon rendered as text) which the scraper
+# must strip.  Label text matches actual Fundamentus page content.
 _SAMPLE_FUNDAMENTUS_HTML_CLASSES = """
 <html><body>
 <table class="w728">
   <tr>
-    <td class="label"><span class="txt">Papel</span></td>
+    <td class="label"><span class="txt">?Papel</span></td>
     <td class="data"><span class="txt">PETR4</span></td>
-    <td class="label"><span class="txt">Cota\xe7\xe3o</span></td>
+    <td class="label"><span class="txt">?Cota\xe7\xe3o</span></td>
     <td class="data"><span class="txt">38,50</span></td>
   </tr>
   <tr>
-    <td class="label"><span class="txt">P/L ?</span></td>
+    <td class="label"><span class="txt">?P/L</span></td>
     <td class="data"><span class="txt">6,20</span></td>
-    <td class="label"><span class="txt">P/VP ?</span></td>
+    <td class="label"><span class="txt">?P/VP</span></td>
     <td class="data"><span class="txt">1,10</span></td>
   </tr>
   <tr>
-    <td class="label"><span class="txt">EV/EBITDA ?</span></td>
+    <td class="label"><span class="txt">?EV / EBITDA</span></td>
     <td class="data"><span class="txt">4,50</span></td>
-    <td class="label"><span class="txt">EV/EBIT ?</span></td>
+    <td class="label"><span class="txt">?EV / EBIT</span></td>
     <td class="data"><span class="txt">5,30</span></td>
   </tr>
   <tr>
-    <td class="label"><span class="txt">Div. Yield ?</span></td>
+    <td class="label"><span class="txt">?Div. Yield</span></td>
     <td class="data"><span class="txt">8,40%</span></td>
-    <td class="label"><span class="txt">ROE ?</span></td>
+    <td class="label"><span class="txt">?ROE</span></td>
     <td class="data"><span class="txt">22,50%</span></td>
   </tr>
   <tr>
-    <td class="label"><span class="txt">ROA ?</span></td>
+    <td class="label"><span class="txt">?EBIT / Ativo</span></td>
     <td class="data"><span class="txt">7,10%</span></td>
-    <td class="label"><span class="txt">Marg. L\xedquida ?</span></td>
+    <td class="label"><span class="txt">?Marg. L\xedquida</span></td>
     <td class="data"><span class="txt">15,20%</span></td>
   </tr>
   <tr>
-    <td class="label"><span class="txt">Liq. Corr. ?</span></td>
+    <td class="label"><span class="txt">?Liquidez Corr</span></td>
     <td class="data"><span class="txt">1,80</span></td>
-    <td class="label"><span class="txt">D\xedv. Bruta/Patrim. ?</span></td>
+    <td class="label"><span class="txt">?Div Br/ Patrim</span></td>
     <td class="data"><span class="txt">0,85</span></td>
   </tr>
 </table>
 </body></html>
 """.encode("iso-8859-1")
 
-# Plain <td> variant (no classes) — exercises the alternating-cell fallback
+# Plain <td> variant (no classes) — exercises the alternating-cell fallback.
+# Also uses actual Fundamentus label text (post-strip) without the '?' prefix.
 _SAMPLE_FUNDAMENTUS_HTML_PLAIN = """
 <html><body>
 <table>
@@ -138,20 +141,20 @@ _SAMPLE_FUNDAMENTUS_HTML_PLAIN = """
     <td>P/VP</td><td>1,10</td>
   </tr>
   <tr>
-    <td>EV/EBITDA</td><td>4,50</td>
-    <td>EV/EBIT</td><td>5,30</td>
+    <td>EV / EBITDA</td><td>4,50</td>
+    <td>EV / EBIT</td><td>5,30</td>
   </tr>
   <tr>
     <td>Div. Yield</td><td>8,40%</td>
     <td>ROE</td><td>22,50%</td>
   </tr>
   <tr>
-    <td>ROA</td><td>7,10%</td>
+    <td>EBIT / Ativo</td><td>7,10%</td>
     <td>Marg. L\xedquida</td><td>15,20%</td>
   </tr>
   <tr>
-    <td>Liq. Corr.</td><td>1,80</td>
-    <td>D\xedv. Bruta/Patrim.</td><td>0,85</td>
+    <td>Liquidez Corr</td><td>1,80</td>
+    <td>Div Br/ Patrim</td><td>0,85</td>
   </tr>
 </table>
 </body></html>
@@ -181,12 +184,14 @@ class TestFetchFundamentusData:
         assert "roe" in keys
 
     @patch("requests.get")
-    def test_class_based_strips_tooltip_question_mark(self, mock_get):
-        """Label 'P/L ?' from the help tooltip must be normalised to 'P/L'."""
+    def test_class_based_strips_leading_tooltip_question_mark(self, mock_get):
+        """Labels prefixed with '?' (tooltip icon) must have the '?' stripped.
+        e.g. '?P/L' -> 'P/L', '?EV / EBITDA' -> 'EV / EBITDA'."""
         mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
         result = fetch_fundamentus_data("PETR4")
         keys = {r["key"] for r in result}
-        assert "pl" in keys  # would be missing if '?' was not stripped
+        assert "pl" in keys        # '?P/L' -> 'P/L' -> matched
+        assert "ev_ebitda" in keys  # '?EV / EBITDA' -> matched
 
     @patch("requests.get")
     def test_class_based_accented_labels_matched(self, mock_get):

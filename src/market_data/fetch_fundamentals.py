@@ -55,28 +55,31 @@ _FUNDAMENTUS_BASE_URL = "https://www.fundamentus.com.br/detalhes.php"
 # Mapping from Fundamentus page label → (internal_key, portuguese_label, is_pct)
 # is_pct=True means the value is expressed as a percentage on the page and
 # must be divided by 100 to match the yfinance decimal convention.
+#
+# Keys must exactly match what appears on the Fundamentus page *after*
+# stripping leading/trailing '?' tooltip characters (see fetch_fundamentus_data).
 _FUNDAMENTUS_FIELD_MAP: Dict[str, tuple] = {
-    "P/L":                ("pl",                "P/L",               False),
-    "P/VP":               ("pvpa",              "P/VPA",             False),
-    "P/EBIT":             ("p_ebit",            "P/EBIT",            False),
-    "EV/EBIT":            ("ev_ebit",           "EV/EBIT",           False),
-    "EV/EBITDA":          ("ev_ebitda",         "EV/EBITDA",         False),
-    "PSR":                ("psr",               "PSR",               False),
-    "P/Ativo":            ("p_ativo",           "P/Ativo",           False),
-    "P/Cap. Giro":        ("p_cap_giro",        "P/Cap. Giro",       False),
-    "P/Ativ Circ Liq":    ("p_ativ_circ_liq",  "P/Ativ Circ Liq",   False),
-    "Div. Yield":         ("dy",                "Dividend Yield",    True),
-    "ROE":                ("roe",               "ROE",               True),
-    "ROIC":               ("roic",              "ROIC",              True),
-    "ROA":                ("roa",               "ROA",               True),
-    "Giro Ativos":        ("giro_ativos",       "Giro Ativos",       False),
-    "Marg. Bruta":        ("margem_bruta",      "Margem Bruta",      True),
-    "Marg. EBIT":         ("margem_ebit",       "Margem EBIT",       True),
-    "Marg. Líquida":      ("margem_liquida",    "Margem Líquida",    True),
-    "Liq. Corr.":         ("liquidez_corrente", "Liquidez Corrente", False),
-    "Dív. Bruta/Patrim.": ("divida_pl",         "Dívida/PL",         False),
-    "Cresc. Rec. 5a.":    ("cresc_receita_5a",  "Cresc. Rec. 5a.",   True),
-    "Cotação":            ("preco",             "Cotação",           False),
+    "P/L":             ("pl",                "P/L",               False),
+    "P/VP":            ("pvpa",              "P/VPA",             False),
+    "P/EBIT":          ("p_ebit",            "P/EBIT",            False),
+    "EV / EBIT":       ("ev_ebit",           "EV/EBIT",           False),
+    "EV / EBITDA":     ("ev_ebitda",         "EV/EBITDA",         False),
+    "PSR":             ("psr",               "PSR",               False),
+    "P/Ativos":        ("p_ativo",           "P/Ativo",           False),
+    "P/Cap. Giro":     ("p_cap_giro",        "P/Cap. Giro",       False),
+    "P/Ativ Circ Liq": ("p_ativ_circ_liq",  "P/Ativ Circ Liq",   False),
+    "Div. Yield":      ("dy",                "Dividend Yield",    True),
+    "ROE":             ("roe",               "ROE",               True),
+    "ROIC":            ("roic",              "ROIC",              True),
+    "EBIT / Ativo":    ("roa",               "EBIT/Ativo",        True),
+    "Giro Ativos":     ("giro_ativos",       "Giro Ativos",       False),
+    "Marg. Bruta":     ("margem_bruta",      "Margem Bruta",      True),
+    "Marg. EBIT":      ("margem_ebit",       "Margem EBIT",       True),
+    "Marg. Líquida":   ("margem_liquida",    "Margem Líquida",    True),
+    "Liquidez Corr":   ("liquidez_corrente", "Liquidez Corrente", False),
+    "Div Br/ Patrim":  ("divida_pl",         "Dívida/PL",         False),
+    "Cres. Rec (5a)":  ("cresc_receita_5a",  "Cresc. Rec. 5a.",   True),
+    "Cotação":         ("preco",             "Cotação",           False),
 }
 
 _FUNDAMENTUS_HEADERS = {
@@ -185,7 +188,7 @@ def fetch_fundamentus_data(ticker: str) -> List[Dict]:
     # following <td class="data"> sibling within the same <tr>.
     # ------------------------------------------------------------------
     for label_td in soup.find_all("td", class_="label"):
-        label_text = label_td.get_text(strip=True).rstrip("?").strip()
+        label_text = label_td.get_text(strip=True).strip("?").strip()
         data_td = label_td.find_next_sibling("td", class_="data")
         if data_td and label_text:
             raw_data[label_text] = data_td.get_text(strip=True)
@@ -199,7 +202,7 @@ def fetch_fundamentus_data(ticker: str) -> List[Dict]:
             for row in table.find_all("tr"):
                 cells = row.find_all("td")
                 for i in range(0, len(cells) - 1, 2):
-                    label = cells[i].get_text(strip=True).rstrip("?").strip()
+                    label = cells[i].get_text(strip=True).strip("?").strip()
                     value = cells[i + 1].get_text(strip=True)
                     if label and value:
                         raw_data[label] = value
