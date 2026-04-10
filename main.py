@@ -384,7 +384,7 @@ def run_prices(
         _all_news = db.get_all_news()
 
     if tickers is None:
-        # Priority: IBrX 100 universe stored in DB → news mentions → companies
+        # Priority: IBrX 100 universe stored in DB -> news mentions -> companies
         ibrx = market_db.get_ibrx_tickers()
         if ibrx:
             logger.info(
@@ -572,7 +572,7 @@ def run_indicators(
             )
             if checkpoint_date > start_date:
                 logger.info(
-                    "Indicator checkpoint: advancing start_date %s → %s",
+                    "Indicator checkpoint: advancing start_date %s -> %s",
                     start_date,
                     checkpoint_date,
                 )

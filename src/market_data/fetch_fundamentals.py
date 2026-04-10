@@ -131,6 +131,21 @@ def fetch_fundamentus_data(ticker: str) -> List[Dict]:
     Fetches ``https://www.fundamentus.com.br/detalhes.php?papel=<TICKER>``
     and extracts all recognised label/value pairs from the HTML tables.
 
+    **Parsing strategy** (in order of preference):
+
+    1. *Class-based*: finds every ``<td class="label">`` cell and pairs it
+       with the immediately following ``<td class="data">`` sibling.  This
+       matches the Fundamentus DOM exactly.
+    2. *Alternating-cell fallback*: walks every table row and treats
+       adjacent cell pairs as ``(label, value)``.  Used when the class-based
+       strategy yields nothing (e.g. in unit tests with minimal HTML).
+
+    **Encoding**: Fundamentus always serves pages in ISO-8859-1.  Using
+    ``resp.content`` (raw bytes) with ``from_encoding="iso-8859-1"``
+    bypasses ``chardet`` / ``apparent_encoding`` misdetection that would
+    garble accented characters such as those in ``"Marg. Líquida"`` and
+    ``"Cotação"``, preventing them from matching ``_FUNDAMENTUS_FIELD_MAP``.
+
     Args:
         ticker: B3 ticker code without suffix (e.g. ``"PETR4"``).
 
@@ -150,34 +165,54 @@ def fetch_fundamentus_data(ticker: str) -> List[Dict]:
     try:
         resp = requests.get(url, headers=_FUNDAMENTUS_HEADERS, timeout=15)
         resp.raise_for_status()
-        # Fundamentus serves ISO-8859-1 / latin-1 encoded pages
-        resp.encoding = resp.apparent_encoding or "utf-8"
     except Exception as exc:
         logger.warning("Fundamentus request failed for %s: %s", ticker, exc)
         return []
 
     try:
-        soup = BeautifulSoup(resp.text, "html.parser")
+        # Pass raw bytes with the known encoding so BeautifulSoup/chardet
+        # cannot misdetect it and garble accented Portuguese labels.
+        soup = BeautifulSoup(resp.content, "html.parser", from_encoding="iso-8859-1")
     except Exception as exc:
         logger.warning("Failed to parse Fundamentus HTML for %s: %s", ticker, exc)
         return []
 
-    # Extract all label → value pairs from the page tables.
-    # Fundamentus lays the page out as tables where adjacent <td> elements
-    # alternate between label and value within each row.
     raw_data: Dict[str, str] = {}
-    for table in soup.find_all("table"):
-        for row in table.find_all("tr"):
-            cells = row.find_all("td")
-            # Cells alternate: label, value, [label, value, ...]
-            for i in range(0, len(cells) - 1, 2):
-                label = cells[i].get_text(strip=True).rstrip("?").strip()
-                value = cells[i + 1].get_text(strip=True)
-                if label and value:
-                    raw_data[label] = value
+
+    # ------------------------------------------------------------------
+    # Strategy 1: class-based (matches real Fundamentus DOM structure).
+    # Labels are in <td class="label"> cells; values in the immediately
+    # following <td class="data"> sibling within the same <tr>.
+    # ------------------------------------------------------------------
+    for label_td in soup.find_all("td", class_="label"):
+        label_text = label_td.get_text(strip=True).rstrip("?").strip()
+        data_td = label_td.find_next_sibling("td", class_="data")
+        if data_td and label_text:
+            raw_data[label_text] = data_td.get_text(strip=True)
+
+    # ------------------------------------------------------------------
+    # Strategy 2: alternating-cell fallback (used when no class-based
+    # cells were found, e.g. in unit tests with plain <td> markup).
+    # ------------------------------------------------------------------
+    if not raw_data:
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                for i in range(0, len(cells) - 1, 2):
+                    label = cells[i].get_text(strip=True).rstrip("?").strip()
+                    value = cells[i + 1].get_text(strip=True)
+                    if label and value:
+                        raw_data[label] = value
+
+    logger.debug(
+        "Fundamentus raw labels for %s (%d found): %s",
+        ticker,
+        len(raw_data),
+        list(raw_data.keys()),
+    )
 
     if not raw_data:
-        logger.debug("No data extracted from Fundamentus for %s", ticker)
+        logger.warning("No data extracted from Fundamentus for %s", ticker)
         return []
 
     today = datetime.date.today().isoformat()

@@ -81,12 +81,57 @@ class TestParseBrNumber:
 # fetch_fundamentus_data
 # ---------------------------------------------------------------------------
 
-_SAMPLE_FUNDAMENTUS_HTML = """
+# Simulates the real Fundamentus page structure with class="label"/class="data"
+_SAMPLE_FUNDAMENTUS_HTML_CLASSES = """
+<html><body>
+<table class="w728">
+  <tr>
+    <td class="label"><span class="txt">Papel</span></td>
+    <td class="data"><span class="txt">PETR4</span></td>
+    <td class="label"><span class="txt">Cota\xe7\xe3o</span></td>
+    <td class="data"><span class="txt">38,50</span></td>
+  </tr>
+  <tr>
+    <td class="label"><span class="txt">P/L ?</span></td>
+    <td class="data"><span class="txt">6,20</span></td>
+    <td class="label"><span class="txt">P/VP ?</span></td>
+    <td class="data"><span class="txt">1,10</span></td>
+  </tr>
+  <tr>
+    <td class="label"><span class="txt">EV/EBITDA ?</span></td>
+    <td class="data"><span class="txt">4,50</span></td>
+    <td class="label"><span class="txt">EV/EBIT ?</span></td>
+    <td class="data"><span class="txt">5,30</span></td>
+  </tr>
+  <tr>
+    <td class="label"><span class="txt">Div. Yield ?</span></td>
+    <td class="data"><span class="txt">8,40%</span></td>
+    <td class="label"><span class="txt">ROE ?</span></td>
+    <td class="data"><span class="txt">22,50%</span></td>
+  </tr>
+  <tr>
+    <td class="label"><span class="txt">ROA ?</span></td>
+    <td class="data"><span class="txt">7,10%</span></td>
+    <td class="label"><span class="txt">Marg. L\xedquida ?</span></td>
+    <td class="data"><span class="txt">15,20%</span></td>
+  </tr>
+  <tr>
+    <td class="label"><span class="txt">Liq. Corr. ?</span></td>
+    <td class="data"><span class="txt">1,80</span></td>
+    <td class="label"><span class="txt">D\xedv. Bruta/Patrim. ?</span></td>
+    <td class="data"><span class="txt">0,85</span></td>
+  </tr>
+</table>
+</body></html>
+""".encode("iso-8859-1")
+
+# Plain <td> variant (no classes) — exercises the alternating-cell fallback
+_SAMPLE_FUNDAMENTUS_HTML_PLAIN = """
 <html><body>
 <table>
   <tr>
     <td>Papel</td><td>PETR4</td>
-    <td>Cotação</td><td>38,50</td>
+    <td>Cota\xe7\xe3o</td><td>38,50</td>
   </tr>
   <tr>
     <td>P/L</td><td>6,20</td>
@@ -102,29 +147,31 @@ _SAMPLE_FUNDAMENTUS_HTML = """
   </tr>
   <tr>
     <td>ROA</td><td>7,10%</td>
-    <td>Marg. Líquida</td><td>15,20%</td>
+    <td>Marg. L\xedquida</td><td>15,20%</td>
   </tr>
   <tr>
     <td>Liq. Corr.</td><td>1,80</td>
-    <td>Dív. Bruta/Patrim.</td><td>0,85</td>
+    <td>D\xedv. Bruta/Patrim.</td><td>0,85</td>
   </tr>
 </table>
 </body></html>
-"""
+""".encode("iso-8859-1")
 
 
 class TestFetchFundamentusData:
-    def _mock_response(self, html: str, status: int = 200):
+    def _mock_response(self, content: bytes, status: int = 200):
+        """Return a mock requests.Response using *content* as raw bytes."""
         mock_resp = MagicMock()
         mock_resp.status_code = status
-        mock_resp.text = html
-        mock_resp.apparent_encoding = "utf-8"
+        mock_resp.content = content
         mock_resp.raise_for_status = MagicMock()
         return mock_resp
 
+    # --- class-based parsing (primary strategy, mirrors real Fundamentus HTML) --
+
     @patch("requests.get")
-    def test_extracts_known_fields(self, mock_get):
-        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+    def test_class_based_extracts_known_fields(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
         result = fetch_fundamentus_data("PETR4")
         keys = {r["key"] for r in result}
         assert "pl" in keys
@@ -134,25 +181,70 @@ class TestFetchFundamentusData:
         assert "roe" in keys
 
     @patch("requests.get")
+    def test_class_based_strips_tooltip_question_mark(self, mock_get):
+        """Label 'P/L ?' from the help tooltip must be normalised to 'P/L'."""
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
+        result = fetch_fundamentus_data("PETR4")
+        keys = {r["key"] for r in result}
+        assert "pl" in keys  # would be missing if '?' was not stripped
+
+    @patch("requests.get")
+    def test_class_based_accented_labels_matched(self, mock_get):
+        """ISO-8859-1 bytes for 'Marg. Liquida' must decode + match the map."""
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
+        result = fetch_fundamentus_data("PETR4")
+        keys = {r["key"] for r in result}
+        assert "margem_liquida" in keys
+        assert "liquidez_corrente" in keys
+        assert "divida_pl" in keys
+
+    # --- alternating-cell fallback (plain <td> without classes) ---------------
+
+    @patch("requests.get")
+    def test_fallback_extracts_known_fields(self, mock_get):
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_PLAIN)
+        result = fetch_fundamentus_data("PETR4")
+        keys = {r["key"] for r in result}
+        assert "pl" in keys
+        assert "pvpa" in keys
+        assert "ev_ebitda" in keys
+        assert "dy" in keys
+
+    # --- shared assertions -----------------------------------------------------
+
+    @patch("requests.get")
     def test_percentages_divided_by_100(self, mock_get):
-        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
         result = fetch_fundamentus_data("PETR4")
         dy = next(r for r in result if r["key"] == "dy")
-        # 8,40% → 0.0840
+        # 8,40% -> 0.0840
         assert dy["value"] == pytest.approx(0.084, rel=1e-3)
 
     @patch("requests.get")
     def test_non_percentage_not_divided(self, mock_get):
-        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
         result = fetch_fundamentus_data("PETR4")
         pl = next(r for r in result if r["key"] == "pl")
         assert pl["value"] == pytest.approx(6.20, rel=1e-3)
 
     @patch("requests.get")
     def test_ticker_in_each_record(self, mock_get):
-        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML)
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
         result = fetch_fundamentus_data("PETR4")
         assert all(r["ticker"] == "PETR4" for r in result)
+
+    @patch("requests.get")
+    def test_uses_content_not_text(self, mock_get):
+        """Scraper must call resp.content (bytes), NOT resp.text, to avoid
+        encoding misdetection by chardet/apparent_encoding."""
+        mock_get.return_value = self._mock_response(_SAMPLE_FUNDAMENTUS_HTML_CLASSES)
+        result = fetch_fundamentus_data("PETR4")
+        # If resp.text were used, the mock would raise AttributeError on
+        # .content access — but since we passed content=bytes it works fine
+        assert isinstance(result, list)
+        # Verify .text was NOT accessed (content is the correct attribute)
+        resp_mock = mock_get.return_value
+        assert not resp_mock.text.called  # type: ignore[attr-defined]
 
     @patch("requests.get")
     def test_request_exception_returns_empty(self, mock_get):
@@ -162,7 +254,7 @@ class TestFetchFundamentusData:
 
     @patch("requests.get")
     def test_http_error_returns_empty(self, mock_get):
-        mock_resp = self._mock_response("", 404)
+        mock_resp = self._mock_response(b"", 404)
         import requests as req_mod
         mock_resp.raise_for_status.side_effect = req_mod.HTTPError("404")
         mock_get.return_value = mock_resp
@@ -171,7 +263,7 @@ class TestFetchFundamentusData:
 
     @patch("requests.get")
     def test_empty_page_returns_empty(self, mock_get):
-        mock_get.return_value = self._mock_response("<html><body></body></html>")
+        mock_get.return_value = self._mock_response(b"<html><body></body></html>")
         result = fetch_fundamentus_data("PETR4")
         assert result == []
 
