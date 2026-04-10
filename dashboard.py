@@ -159,6 +159,26 @@ def load_asset_prices(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_tickers(db_path: str = DB_PATH) -> List[str]:
+    """Return the IBrX 100 ticker universe stored in *ibrx_tickers*.
+
+    Falls back to distinct tickers in *asset_prices* only when the IBrX
+    table is absent or empty (e.g. ``run_ibrx_tickers`` has not yet run).
+    This mirrors the scoping logic used by the data-collection pipeline so
+    that the "Ativos Rastreados" KPI reflects the IBrX 100 universe rather
+    than every ticker present in the prices table.
+    """
+    try:
+        if _table_exists("ibrx_tickers", db_path):
+            conn = _conn(db_path)
+            df = pd.read_sql_query(
+                "SELECT ticker FROM ibrx_tickers ORDER BY ticker", conn
+            )
+            conn.close()
+            if not df.empty:
+                return df["ticker"].tolist()
+    except Exception:
+        pass
+
     if not _table_exists("asset_prices", db_path):
         return []
     try:
