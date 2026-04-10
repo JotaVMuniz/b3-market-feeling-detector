@@ -67,6 +67,11 @@ from src.market_data.fetch_sentiment_indicators import (
     fetch_market_indicators_range,
     fetch_bcb_indicators,
 )
+from src.market_data.fetch_fundamentals import (
+    fetch_fundamentals_for_tickers,
+    fetch_macro_fundamentals,
+)
+from src.market_data.fetch_ibrx import fetch_ibrx100_tickers
 from src.market_data.compute_composite_index import (
     compute_composite_index,
     indicators_to_raw_records,
@@ -313,6 +318,34 @@ def run_trusted(reprocess_all: bool = False) -> None:
     logger.info("Stage TRUSTED complete\n")
 
 
+def run_ibrx_tickers() -> List[str]:
+    """
+    Fetch and persist the current IBrX 100 ticker list.
+
+    This stage should be executed **first**, before any data-fetching
+    stage, so the pipeline scope is established upfront.  The ticker
+    list is written to the ``ibrx_tickers`` database table and returned
+    for immediate use within the same process.
+
+    Returns:
+        List of B3 ticker codes that compose the IBrX 100 index.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: IBRX — fetching IBrX 100 ticker universe")
+    logger.info("=" * 60)
+
+    tickers = fetch_ibrx100_tickers()
+    logger.info("IBrX 100 universe: %d tickers", len(tickers))
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+    today = datetime.date.today().isoformat()
+    market_db.upsert_ibrx_tickers(tickers, updated_at=today)
+
+    logger.info("Stage IBRX complete\n")
+    return tickers
+
+
 def run_prices(
     tickers: Optional[List[str]] = None,
     dates: Optional[List[datetime.date]] = None,
@@ -351,9 +384,17 @@ def run_prices(
         _all_news = db.get_all_news()
 
     if tickers is None:
-        tickers_set = _collect_tickers_from_news(_all_news)
-        tickers_set.update(market_db.get_known_tickers())
-        tickers = list(tickers_set)
+        # Priority: IBrX 100 universe stored in DB -> news mentions -> companies
+        ibrx = market_db.get_ibrx_tickers()
+        if ibrx:
+            logger.info(
+                "Using IBrX 100 universe (%d tickers) as price scope", len(ibrx)
+            )
+            tickers = ibrx
+        else:
+            tickers_set = _collect_tickers_from_news(_all_news)
+            tickers_set.update(market_db.get_known_tickers())
+            tickers = list(tickers_set)
 
     if not tickers:
         logger.warning("No tickers found — skipping PRICES stage")
@@ -531,7 +572,7 @@ def run_indicators(
             )
             if checkpoint_date > start_date:
                 logger.info(
-                    "Indicator checkpoint: advancing start_date %s → %s",
+                    "Indicator checkpoint: advancing start_date %s -> %s",
                     start_date,
                     checkpoint_date,
                 )
@@ -586,6 +627,89 @@ def run_indicators(
         )
 
     logger.info("Stage INDICATORS complete\n")
+
+
+def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
+    """
+    Stage 5 – Fundamentals: fetch fundamental indicators for tracked assets.
+
+    Fetches per-asset fundamental data (P/L, P/VPA, EV/EBITDA, ROE,
+    Margem Líquida, ROA, Dívida/PL, Liquidez Corrente, Dividend Yield,
+    Payout) via **yfinance** for every known B3 ticker, and stores the
+    results in the ``asset_fundamentals`` table.
+
+    Additionally fetches macroeconomic context (Selic meta, IPCA 12m)
+    from **mercados.bcb** and stores it under the special ticker
+    ``"__MACRO__"``.
+
+    For FIIs (tickers ending in ``11``), the stage also tries to
+    supplement the Dividend Yield using live dividend data from
+    **mercados.b3** when neither Fundamentus nor yfinance provides a value.
+
+    Args:
+        tickers: Explicit list of B3 ticker codes to update.  When
+                 ``None`` the IBrX 100 universe stored in the database is
+                 used (populated by :func:`run_ibrx_tickers`).  Falls back
+                 to tickers with price data when the IBrX list is empty.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: FUNDAMENTALS — fetching fundamental indicators")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+
+    # Resolve ticker list:
+    # 1. IBrX 100 universe (ideal — pre-fetched by run_ibrx_tickers)
+    # 2. Tickers with actual price data (reliable fallback)
+    if tickers is None:
+        ibrx = market_db.get_ibrx_tickers()
+        if ibrx:
+            logger.info(
+                "Using IBrX 100 universe (%d tickers) as fundamentals scope",
+                len(ibrx),
+            )
+            tickers = ibrx
+        else:
+            tickers = list(market_db.get_tickers_with_prices())
+
+    if not tickers:
+        logger.warning("No tickers found — skipping FUNDAMENTALS stage")
+    else:
+        logger.info("Fetching fundamentals for %d tickers (Fundamentus + yfinance)", len(tickers))
+        fund_records = fetch_fundamentals_for_tickers(tickers)
+
+        # FII DY supplement via mercados.b3
+        from src.market_data.fetch_fundamentals import (
+            _is_fii_ticker,
+            fetch_fii_dy_supplement,
+        )
+        existing_dy = {r["ticker"] for r in fund_records if r["key"] == "dy"}
+        for ticker in tickers:
+            if _is_fii_ticker(ticker) and ticker not in existing_dy:
+                price_rows = market_db.get_prices_for_ticker(
+                    ticker,
+                    (datetime.date.today() - datetime.timedelta(days=7)).isoformat(),
+                    datetime.date.today().isoformat(),
+                )
+                current_price = price_rows[-1]["close"] if price_rows else None
+                supplement = fetch_fii_dy_supplement(ticker, current_price)
+                if supplement:
+                    fund_records.append(supplement)
+
+        written = market_db.upsert_fundamentals(fund_records)
+        logger.info("Stored %d fundamental records in asset_fundamentals", written)
+
+    # Macro indicators (Selic, IPCA) — always fetched
+    macro_records = fetch_macro_fundamentals()
+    if macro_records:
+        written_macro = market_db.upsert_fundamentals(macro_records)
+        logger.info(
+            "Stored %d macro fundamental records in asset_fundamentals",
+            written_macro,
+        )
+
+    logger.info("Stage FUNDAMENTALS complete\n")
 
 
 def run_analytics() -> None:
@@ -645,7 +769,7 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         fetch_market_data:  If False, skip the prices, indicators and analytics stages.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> prices -> indicators -> analytics)")
+    logger.info("Starting full pipeline (raw -> tweets -> trusted -> cleanup -> ibrx -> prices -> indicators -> fundamentals -> analytics)")
     logger.info("=" * 60)
 
     try:
@@ -654,8 +778,10 @@ def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = Tru
         run_trusted(reprocess_all=reprocess_existing)
         run_cleanup()
         if fetch_market_data:
+            run_ibrx_tickers()
             run_prices()
             run_indicators()
+            run_fundamentals()
             run_analytics()
 
         logger.info("=" * 60)
@@ -682,10 +808,13 @@ Examples:
   python main.py --stage trusted
   python main.py --stage trusted --reprocess-existing
   python main.py --stage cleanup
+  python main.py --stage ibrx
   python main.py --stage prices
   python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
   python main.py --stage indicators
   python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
+  python main.py --stage fundamentals
+  python main.py --stage fundamentals --tickers PETR4,VALE3
   python main.py --stage analytics
   python main.py --stage backfill
   python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
@@ -696,7 +825,7 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'all'],
+        choices=['raw', 'tweets', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'fundamentals', 'ibrx', 'all'],
         default='all',
         help=(
             'Pipeline stage to execute. '
@@ -718,7 +847,7 @@ Examples:
         type=str,
         default=None,
         metavar='TICKER1,TICKER2',
-        help='Comma-separated tickers for the prices stage.',
+        help='Comma-separated tickers for the prices and fundamentals stages.',
     )
     parser.add_argument(
         '--date',
@@ -773,6 +902,10 @@ Examples:
         run_indicators(start_date=_from_date, end_date=_to_date)
     elif args.stage == 'analytics':
         run_analytics()
+    elif args.stage == 'fundamentals':
+        run_fundamentals(tickers=_tickers_arg)
+    elif args.stage == 'ibrx':
+        run_ibrx_tickers()
     elif args.stage == 'backfill':
         run_backfill(start_date=_from_date, end_date=_to_date)
     else:  # 'all'

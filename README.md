@@ -11,6 +11,8 @@ Pipeline de ingestão e análise de sentimento de notícias financeiras brasilei
 - **Enriquecimento NLP** via OpenAI GPT-4o-mini: sentimento, tickers, segmentos
 - **Limpeza automática** de notícias e posts com sentimento neutro e mais de 7 dias
 - **Preços históricos B3** desde 2025-01-01 (todos os ativos)
+- **Indicadores fundamentalistas** (P/L, P/VPA, EV/EBITDA, ROE, Dividend Yield, etc.) via yfinance — ingestão restrita aos ativos que já possuem preços no banco, evitando requisições desnecessárias a tickers inválidos
+- **Indicadores macroeconômicos** (Selic meta e IPCA 12m) via Banco Central
 - **Correlações** notícia × variação de preço (D0, D+1, D+5)
 - **Dashboard** orientado por ativo com visão geral por segmento — notícias e posts do X na mesma aba
 
@@ -93,13 +95,15 @@ python main.py --stage tweets       # busca posts do X (Twitter)
 python main.py --stage trusted      # sentimento/NLP (notícias + posts)
 python main.py --stage cleanup      # remove notícias neutras com > 7 dias
 python main.py --stage prices       # preços do dia
+python main.py --stage fundamentals # indicadores fundamentalistas (apenas ativos com preços no banco)
+python main.py --stage fundamentals --tickers PETR4,VALE3  # tickers específicos
 python main.py --stage analytics    # correlações
 ```
 
 ### Sequência completa do pipeline
 
 ```
-raw → tweets → trusted → cleanup → prices → indicators → analytics
+raw → tweets → trusted → cleanup → prices → indicators → fundamentals → analytics
 ```
 
 ---
@@ -135,8 +139,9 @@ flowchart TD
         T[Stage: trusted\nNLP / OpenAI]
         CL[Stage: cleanup\nneutro > 7 dias]
         P[Stage: prices\nB3 cotações]
+        F[Stage: fundamentals\nP/L, DY, ROE, Selic…]
         A[Stage: analytics\ncorrelações]
-        R --> TW --> T --> CL --> P --> A
+        R --> TW --> T --> CL --> P --> F --> A
     end
 
     subgraph Armazenamento

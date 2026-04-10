@@ -85,11 +85,14 @@ def _make_mock_db(**overrides):
 def _make_mock_market_db():
     m = Mock()
     m.get_known_tickers.return_value = set()
+    m.get_ibrx_tickers.return_value = []
+    m.get_tickers_with_prices.return_value = set()
     m.upsert_prices.return_value = 0
     m.upsert_companies.return_value = 0
     m.upsert_correlations.return_value = 0
     m.upsert_indicators.return_value = 0
     m.upsert_composite_index.return_value = 0
+    m.upsert_ibrx_tickers.return_value = 0
     m.get_indicators.return_value = []
     m.get_ingested_price_dates.return_value = set()
     m.get_latest_indicator_date.return_value = None

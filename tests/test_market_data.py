@@ -535,3 +535,97 @@ class TestMarketDatabaseCheckpoints:
         market_db.upsert_indicators(records)
         result = market_db.get_latest_indicator_date()
         assert result == "2026-04-05"
+
+
+# ---------------------------------------------------------------------------
+# IBrX 100 — database methods
+# ---------------------------------------------------------------------------
+
+class TestIbrxTickersDatabase:
+    def test_upsert_and_get(self, market_db):
+        tickers = ["PETR4", "VALE3", "ITUB4"]
+        written = market_db.upsert_ibrx_tickers(tickers, "2026-04-08")
+        assert written == 3
+        result = market_db.get_ibrx_tickers()
+        assert sorted(result) == sorted(tickers)
+
+    def test_empty_list_returns_zero(self, market_db):
+        assert market_db.upsert_ibrx_tickers([], "2026-04-08") == 0
+
+    def test_empty_db_returns_empty_list(self, market_db):
+        assert market_db.get_ibrx_tickers() == []
+
+    def test_upsert_replaces_previous_list(self, market_db):
+        market_db.upsert_ibrx_tickers(["PETR4", "VALE3"], "2026-04-07")
+        market_db.upsert_ibrx_tickers(["WEGE3", "BBAS3"], "2026-04-08")
+        result = market_db.get_ibrx_tickers()
+        assert "PETR4" not in result
+        assert "WEGE3" in result
+
+    def test_returns_sorted_alphabetically(self, market_db):
+        market_db.upsert_ibrx_tickers(["VALE3", "ABEV3", "PETR4"], "2026-04-08")
+        result = market_db.get_ibrx_tickers()
+        assert result == sorted(result)
+
+
+# ---------------------------------------------------------------------------
+# IBrX 100 — fetch_ibrx100_tickers
+# ---------------------------------------------------------------------------
+
+class TestFetchIbrx100Tickers:
+    from src.market_data.fetch_ibrx import _IBRX100_FALLBACK, fetch_ibrx100_tickers
+
+    @patch("requests.get")
+    def test_returns_tickers_from_api(self, mock_get):
+        from src.market_data.fetch_ibrx import fetch_ibrx100_tickers
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {
+            "results": [
+                {"cod": "PETR4"},
+                {"cod": "VALE3"},
+                {"cod": "ITUB4"},
+            ]
+        }
+        mock_get.return_value = mock_resp
+        result = fetch_ibrx100_tickers()
+        assert "PETR4" in result
+        assert "VALE3" in result
+        assert "ITUB4" in result
+
+    @patch("requests.get")
+    def test_falls_back_on_network_error(self, mock_get):
+        from src.market_data.fetch_ibrx import fetch_ibrx100_tickers, _IBRX100_FALLBACK
+        mock_get.side_effect = OSError("network error")
+        result = fetch_ibrx100_tickers()
+        assert result == list(_IBRX100_FALLBACK)
+
+    @patch("requests.get")
+    def test_falls_back_on_empty_results(self, mock_get):
+        from src.market_data.fetch_ibrx import fetch_ibrx100_tickers, _IBRX100_FALLBACK
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"results": []}
+        mock_get.return_value = mock_resp
+        result = fetch_ibrx100_tickers()
+        assert result == list(_IBRX100_FALLBACK)
+
+    @patch("requests.get")
+    def test_tickers_are_uppercase(self, mock_get):
+        from src.market_data.fetch_ibrx import fetch_ibrx100_tickers
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"results": [{"cod": "petr4"}, {"cod": "vale3"}]}
+        mock_get.return_value = mock_resp
+        result = fetch_ibrx100_tickers()
+        assert all(t == t.upper() for t in result)
+
+    @patch("requests.get")
+    def test_strips_whitespace(self, mock_get):
+        from src.market_data.fetch_ibrx import fetch_ibrx100_tickers
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = {"results": [{"cod": " PETR4 "}]}
+        mock_get.return_value = mock_resp
+        result = fetch_ibrx100_tickers()
+        assert "PETR4" in result

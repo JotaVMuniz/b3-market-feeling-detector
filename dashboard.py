@@ -159,6 +159,26 @@ def load_asset_prices(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_tickers(db_path: str = DB_PATH) -> List[str]:
+    """Return the IBrX 100 ticker universe stored in *ibrx_tickers*.
+
+    Falls back to distinct tickers in *asset_prices* only when the IBrX
+    table is absent or empty (e.g. ``run_ibrx_tickers`` has not yet run).
+    This mirrors the scoping logic used by the data-collection pipeline so
+    that the "Ativos Rastreados" KPI reflects the IBrX 100 universe rather
+    than every ticker present in the prices table.
+    """
+    try:
+        if _table_exists("ibrx_tickers", db_path):
+            conn = _conn(db_path)
+            df = pd.read_sql_query(
+                "SELECT ticker FROM ibrx_tickers ORDER BY ticker", conn
+            )
+            conn.close()
+            if not df.empty:
+                return df["ticker"].tolist()
+    except Exception:
+        pass
+
     if not _table_exists("asset_prices", db_path):
         return []
     try:
@@ -269,6 +289,25 @@ def load_composite_index(
         return df
     except Exception as e:
         st.error(f"Erro ao carregar índice composto: {e}")
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def load_fundamentals(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
+    """Load fundamental indicators for *ticker* from the database."""
+    if not _table_exists("asset_fundamentals", db_path):
+        return pd.DataFrame()
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(
+            "SELECT key, value, label, updated_at FROM asset_fundamentals "
+            "WHERE ticker = ? ORDER BY key",
+            conn,
+            params=(ticker,),
+        )
+        conn.close()
+        return df
+    except Exception:
         return pd.DataFrame()
 
 
@@ -785,18 +824,94 @@ def _render_asset_tab():
         if avg_d5 is not None:
             cc2.metric("Retorno Médio D+5", f"{avg_d5:.2f}%")
 
+    # --- Fundamental indicators ---------------------------------------------
+    st.divider()
+    st.subheader("💹 Indicadores Fundamentalistas")
+
+    fund_df = load_fundamentals(selected)
+    macro_df = load_fundamentals("__MACRO__")
+
+    # Helper: format a value according to its key
+    def _fmt_fund(key: str, value: float) -> str:
+        pct_keys = {"roe", "roa", "margem_liquida", "dy", "payout"}
+        if key in pct_keys:
+            return f"{value * 100:.2f}%"
+        return f"{value:.2f}"
+
+    if not fund_df.empty:
+        # Group indicators by category
+        _CATEGORIES = {
+            "📊 Preço e Valuation": ["pl", "pvpa", "ev_ebitda"],
+            "💰 Rentabilidade e Eficiência": ["roe", "roa", "margem_liquida"],
+            "🏦 Saúde Financeira": ["divida_pl", "liquidez_corrente"],
+            "💸 Remuneração ao Acionista": ["dy", "payout"],
+        }
+
+        fund_by_key = dict(zip(fund_df["key"], zip(fund_df["value"], fund_df["label"])))
+        updated = fund_df["updated_at"].dropna().max() or "N/A"
+
+        st.caption(f"Fonte: Yahoo Finance (yfinance) · Atualizado em: {updated}")
+
+        for cat_name, keys in _CATEGORIES.items():
+            items = [(key, fund_by_key[key]) for key in keys if key in fund_by_key]
+            if not items:
+                continue
+            st.markdown(f"**{cat_name}**")
+            cols = st.columns(len(items))
+            for col, (key, (value, label)) in zip(cols, items):
+                col.metric(label, _fmt_fund(key, value))
+
+    else:
+        st.info(
+            "Sem dados fundamentalistas para este ativo. Execute:\n"
+            "```\npython main.py --stage fundamentals\n```"
+        )
+
+    # --- Macro context (Selic / IPCA) ---------------------------------------
+    if not macro_df.empty:
+        st.markdown("**🌐 Contexto Macroeconômico**")
+        macro_by_key = dict(zip(macro_df["key"], zip(macro_df["value"], macro_df["label"])))
+        macro_items = [
+            ("selic_meta", "Selic Meta (% a.a.)", lambda v: f"{v:.2f}%"),
+            ("ipca_12m",   "IPCA 12 meses (%)",   lambda v: f"{v:.2f}%"),
+        ]
+        visible = [(label, fmt(macro_by_key[k][0]))
+                   for k, label, fmt in macro_items if k in macro_by_key]
+        if visible:
+            mc = st.columns(len(visible))
+            for col, (label, val_str) in zip(mc, visible):
+                col.metric(label, val_str)
+
     # --- Direct ticker news -------------------------------------------------
+    st.divider()
     st.subheader(f"📰 Notícias sobre {selected}")
 
-    def _render_news_rows(df: pd.DataFrame, max_rows: int = 30) -> None:
+    def _render_news_rows(df: pd.DataFrame, max_rows: int = 30, use_expander: bool = True) -> None:
         for _, row in df.head(max_rows).iterrows():
             pub = row["published_at"].strftime("%Y-%m-%d") if pd.notna(row["published_at"]) else "N/A"
             sent = row.get("sentiment", "neutro") or "neutro"
             color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
-            with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+            if use_expander:
+                with st.expander(f"{color} {row['title']} — {row['source']} ({pub})"):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.markdown(row.get("content") or "")
+                        st.markdown(f"[🔗 Leia mais]({row['url']})")
+                    with col2:
+                        st.markdown(f"**Sentimento:** {sent}")
+                        conf = row.get("confidence", 0)
+                        if conf:
+                            st.markdown(f"**Confiança:** {conf:.2f}")
+                        segs = row.get("segments", [])
+                        if segs:
+                            st.markdown(f"**Segmentos:** {', '.join(segs)}")
+            else:
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.markdown(row.get("content") or "")
+                    st.markdown(f"{color} **{row['title']}** — {row['source']} ({pub})")
+                    content = row.get("content") or ""
+                    if content:
+                        st.caption(content[:200] + ("…" if len(content) > 200 else ""))
                     st.markdown(f"[🔗 Leia mais]({row['url']})")
                 with col2:
                     st.markdown(f"**Sentimento:** {sent}")
@@ -806,6 +921,7 @@ def _render_asset_tab():
                     segs = row.get("segments", [])
                     if segs:
                         st.markdown(f"**Segmentos:** {', '.join(segs)}")
+                st.divider()
 
     if news_df.empty:
         st.info("Nenhuma notícia encontrada para este ativo no período.")
@@ -833,7 +949,7 @@ def _render_asset_tab():
                 seg_sentiment = compute_asset_sentiment(seg_df)
                 if seg_sentiment["count"] > 0:
                     _render_sentiment_indicator(seg_sentiment)
-                _render_news_rows(seg_df, max_rows=20)
+                _render_news_rows(seg_df, max_rows=20, use_expander=False)
     else:
         st.caption("ℹ️ Nenhum segmento identificado para este ativo com base nas notícias disponíveis.")
 
