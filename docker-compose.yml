@@ -4,7 +4,6 @@ services:
   # ─────────────────────────────────────────────────────────────────────────
   pipeline:
     build: .
-    image: b3-market-feeling-detector
     entrypoint: ["/app/entrypoint.sh"]
     env_file:
       - .env
