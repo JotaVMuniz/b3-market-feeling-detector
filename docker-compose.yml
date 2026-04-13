@@ -18,7 +18,6 @@ services:
   # ─────────────────────────────────────────────────────────────────────────
   dashboard:
     build: .
-    image: b3-market-feeling-detector
     volumes:
       - pipeline_data:/app/data
     ports:
