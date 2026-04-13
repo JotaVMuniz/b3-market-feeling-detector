@@ -12,7 +12,6 @@ from main import (
     run_prices,
     run_raw,
     run_trusted,
-    run_tweets,
 )
 
 
@@ -45,6 +44,7 @@ _CLEANED_NEWS = [
 _ENRICHMENT_RESULT = [
     {
         "is_relevant": True,
+        "market_relevance": 0.8,
         "sentiment": "positivo",
         "confidence": 0.9,
         "segments": ["bancos"],
@@ -116,7 +116,6 @@ def test_run_pipeline_reprocess_existing_updates_database(monkeypatch):
          patch("main.validate_news_entry", return_value=True), \
          patch("main.enrich_batch", return_value=_ENRICHMENT_RESULT), \
          patch("main.save_raw_news", return_value="data/raw/news.json"), \
-         patch("main.fetch_tweets", return_value=[]), \
          patch("main.NewsDatabase", return_value=mock_db), \
          patch("main.MarketDatabase", return_value=mock_market_db), \
          patch("main.fetch_prices_for_tickers", return_value=[]), \
@@ -388,32 +387,6 @@ class TestRawCheckpoint:
             run_raw()
 
         mock_db.insert_news.assert_called_once()
-
-
-class TestTweetCheckpoint:
-    """Checkpoint logic for the tweets ingestion stage."""
-
-    def test_passes_start_time_to_fetch_tweets_when_checkpoint_exists(self):
-        """If a previous tweet exists, start_time is forwarded to fetch_tweets."""
-        mock_db = _make_mock_db()
-        mock_db.get_latest_published_at_by_source.return_value = "2026-04-06T12:00:00Z"
-
-        with patch("main.NewsDatabase", return_value=mock_db), \
-             patch("main.fetch_tweets", return_value=[]) as mock_fetch:
-            run_tweets()
-
-        mock_fetch.assert_called_once_with(start_time="2026-04-06T12:00:00Z")
-
-    def test_no_start_time_when_no_checkpoint(self):
-        """On first run (no checkpoint) fetch_tweets is called without start_time."""
-        mock_db = _make_mock_db()
-        mock_db.get_latest_published_at_by_source.return_value = None
-
-        with patch("main.NewsDatabase", return_value=mock_db), \
-             patch("main.fetch_tweets", return_value=[]) as mock_fetch:
-            run_tweets()
-
-        mock_fetch.assert_called_once_with(start_time=None)
 
 
 class TestPriceCheckpoint:

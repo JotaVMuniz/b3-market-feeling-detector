@@ -94,6 +94,10 @@ class NewsDatabase:
                 if 'is_relevant' not in columns:
                     cursor.execute("ALTER TABLE news ADD COLUMN is_relevant INTEGER")
                     logger.info("Added is_relevant column to news table")
+
+                if 'market_relevance' not in columns:
+                    cursor.execute("ALTER TABLE news ADD COLUMN market_relevance REAL")
+                    logger.info("Added market_relevance column to news table")
                 
                 # Create index on source and published_at for better query performance
                 cursor.execute("""
@@ -144,8 +148,8 @@ class NewsDatabase:
                     try:
                         cursor.execute("""
                             INSERT INTO news 
-                            (title, content, source, published_at, url, collected_at, is_relevant, sentiment, confidence, segments, tickers)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (title, content, source, published_at, url, collected_at, is_relevant, sentiment, confidence, segments, tickers, market_relevance)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
                             news.get("title", ""),
                             news.get("summary", ""),
@@ -157,7 +161,8 @@ class NewsDatabase:
                             news.get("sentiment"),
                             news.get("confidence"),
                             json.dumps(news.get("segments", [])),
-                            json.dumps(news.get("tickers", []))
+                            json.dumps(news.get("tickers", [])),
+                            news.get("market_relevance"),
                         ))
                         inserted_count += 1
                     
@@ -400,7 +405,8 @@ class NewsDatabase:
                                 sentiment = ?,
                                 confidence = ?,
                                 segments = ?,
-                                tickers = ?
+                                tickers = ?,
+                                market_relevance = ?
                             WHERE url = ?
                         """, (
                             1 if news.get("is_relevant", False) else 0,
@@ -408,6 +414,7 @@ class NewsDatabase:
                             news.get("confidence"),
                             json.dumps(news.get("segments", [])),
                             json.dumps(news.get("tickers", [])),
+                            news.get("market_relevance"),
                             news.get("url", "")
                         ))
                         if cursor.rowcount:

@@ -111,6 +111,7 @@ If the news is NOT relevant, respond ONLY with:
 
 {{
 "is_relevant": false,
+"market_relevance": 0.0,
 "sentiment": "neutro",
 "confidence": 0.0,
 "segments": [],
@@ -123,6 +124,7 @@ If the news IS relevant, respond ONLY with:
 
 {{
 "is_relevant": true,
+"market_relevance": number between 0 and 1,
 "sentiment": "positivo | negativo | neutro",
 "confidence": number between 0 and 1,
 "segments": ["segment1", "segment2"],
@@ -141,6 +143,7 @@ Rules:
 * If no ticker is clearly mentioned, return []
 * sentiment must be strictly one of: positivo, negativo, neutro
 * confidence must be between 0 and 1
+* market_relevance is a score from 0 to 1 indicating how relevant and impactful the news is for the Brazilian financial market (0 = not relevant at all, 1 = highly relevant, market-moving news)
 * Output MUST be valid JSON only (no explanations)
 
 News:
@@ -161,6 +164,11 @@ News:
             is_relevant = data.get("is_relevant", False)
             if not isinstance(is_relevant, bool):
                 raise ValueError(f"Invalid is_relevant: {is_relevant}")
+
+            # Validate market_relevance
+            market_relevance = data.get("market_relevance", 0.0)
+            if not isinstance(market_relevance, (int, float)) or not (0.0 <= market_relevance <= 1.0):
+                raise ValueError(f"Invalid market_relevance: {market_relevance}")
 
             # Validate sentiment
             sentiment = data.get("sentiment", "").lower()
@@ -186,13 +194,15 @@ News:
             # Filter to valid tickers only
             tickers = [t for t in tickers if TICKER_PATTERN.match(t)]
 
-            # Anti-hallucination: if not relevant, force empty lists
+            # Anti-hallucination: if not relevant, force empty lists and zero relevance
             if not is_relevant:
                 segments = []
                 tickers = []
+                market_relevance = 0.0
 
             return {
                 "is_relevant": is_relevant,
+                "market_relevance": float(market_relevance),
                 "sentiment": sentiment,
                 "confidence": float(confidence),
                 "segments": segments,
@@ -203,6 +213,7 @@ News:
             logger.warning(f"Failed to parse response: {response_text}. Error: {str(e)}")
             return {
                 "is_relevant": False,
+                "market_relevance": 0.0,
                 "sentiment": "neutro",
                 "confidence": 0.0,
                 "segments": [],
@@ -240,6 +251,7 @@ News:
                     logger.error(f"All retries failed for text: {truncated_text[:50]}...", exc_info=True)
                     return {
                         "is_relevant": False,
+                        "market_relevance": 0.0,
                         "sentiment": "neutro",
                         "confidence": 0.0,
                         "segments": [],
@@ -248,6 +260,7 @@ News:
 
         return {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -267,6 +280,7 @@ def enrich_news(text: str) -> Dict:
     Returns:
         Dict with keys:
         - is_relevant: bool (whether news is financially relevant)
+        - market_relevance: float between 0 and 1 (relevance score for the Brazilian financial market)
         - sentiment: "positivo" | "negativo" | "neutro"
         - confidence: float between 0 and 1
         - segments: list of str (market segments)
@@ -275,6 +289,7 @@ def enrich_news(text: str) -> Dict:
     if not text or not text.strip():
         return {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -292,6 +307,7 @@ def enrich_news(text: str) -> Dict:
         logger.debug("Text filtered out as non-financial, skipping API call")
         result = {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -311,6 +327,7 @@ def enrich_news(text: str) -> Dict:
         logger.error("News enrichment failed, applying fallback", exc_info=True)
         result = {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -357,6 +374,7 @@ def enrich_batch(texts: List[str]) -> List[Dict]:
             logger.error("Batch enrichment failed for one text, applying fallback", exc_info=True)
             result = {
                 "is_relevant": False,
+                "market_relevance": 0.0,
                 "sentiment": "neutro",
                 "confidence": 0.0,
                 "segments": [],
