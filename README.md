@@ -30,7 +30,11 @@ b3-market-feeling-detector/
 ├── tests/                  # Suite de testes (pytest)
 ├── main.py                 # Orquestrador do pipeline
 ├── dashboard.py            # Dashboard Streamlit
-├── Dockerfile              # Imagem para Cloud Run
+├── Dockerfile              # Imagem Docker
+├── docker-compose.yml      # Compose: pipeline (cron) + dashboard (Streamlit)
+├── crontab                 # Agendamento cron diário (23:00 UTC)
+├── entrypoint.sh           # Entrypoint do container de pipeline
+├── .env.example            # Template de variáveis de ambiente
 └── requirements.txt
 ```
 
@@ -42,6 +46,67 @@ b3-market-feeling-detector/
 pip install -r requirements.txt
 cp .env.example .env   # preencha OPENAI_API_KEY
 ```
+
+---
+
+## Executando com Docker
+
+O projeto inclui um `docker-compose.yml` com dois serviços que compartilham um volume persistente para o banco SQLite:
+
+| Serviço | Função |
+|---------|--------|
+| `pipeline` | Executa `python main.py --stage all` todo dia às **23:00 UTC (20:00 BRT)** via cron |
+| `dashboard` | Serve o dashboard Streamlit em `http://localhost:8501` |
+
+### 1. Configure as variáveis de ambiente
+
+```bash
+cp .env.example .env
+# Edite .env e preencha OPENAI_API_KEY
+```
+
+### 2. Suba os containers
+
+```bash
+docker compose up --build -d
+```
+
+- O `pipeline` ficará em execução contínua; o cron dispara o pipeline uma vez ao dia.
+- O `dashboard` estará acessível em `http://localhost:8501`.
+
+### 3. Acompanhe os logs
+
+```bash
+# Logs do pipeline (cron + execução diária)
+docker compose logs -f pipeline
+
+# Logs do dashboard
+docker compose logs -f dashboard
+```
+
+### 4. Execute o pipeline manualmente (opcional)
+
+Para forçar uma execução imediata sem aguardar o horário do cron:
+
+```bash
+docker compose exec pipeline python main.py --stage all
+```
+
+Ou para um estágio específico:
+
+```bash
+docker compose exec pipeline python main.py --stage raw
+docker compose exec pipeline python main.py --stage prices
+```
+
+### 5. Parar os containers
+
+```bash
+docker compose down
+```
+
+> O banco de dados fica no volume Docker `pipeline_data` e persiste entre reinicializações.
+> Para apagar todos os dados use `docker compose down -v`.
 
 ---
 
