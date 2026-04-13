@@ -67,6 +67,9 @@ cp .env.example .env
 
 ### 2. Suba os containers
 
+> **⚠️ Sempre use `--build` na primeira execução** (ou após alterar o código).
+> Sem essa flag o Docker Desktop tenta baixar a imagem de um registry e retorna erro 500.
+
 ```bash
 docker compose up --build -d
 ```
@@ -99,7 +102,27 @@ docker compose exec pipeline python main.py --stage raw
 docker compose exec pipeline python main.py --stage prices
 ```
 
-### 5. Parar os containers
+### 5. Expor o dashboard publicamente na web (ngrok)
+
+O servidor Streamlit já escuta em `0.0.0.0:8501`, então qualquer máquina na mesma rede local
+consegue acessar via `http://<ip-da-máquina>:8501`. Para expor na internet sem configurar
+infraestrutura de nuvem, use o [ngrok](https://ngrok.com/):
+
+```bash
+# Instale o ngrok (https://ngrok.com/download) e autentique uma vez
+ngrok config add-authtoken <seu-token>
+
+# Com os containers já rodando, abra um túnel para a porta 8501
+ngrok http 8501
+```
+
+O ngrok exibirá uma URL pública como `https://abcd1234.ngrok-free.app` — compartilhe esse
+link para que outros acessem o dashboard de qualquer lugar.
+
+> O link muda a cada vez que o ngrok é reiniciado. Para um endereço fixo, consulte os planos
+> pagos do ngrok ou hospede em um serviço de nuvem (ver seção **Arquitetura GCP**).
+
+### 6. Parar os containers
 
 ```bash
 docker compose down

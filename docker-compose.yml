@@ -17,6 +17,7 @@ services:
   # Reuses the image built by the pipeline service.
   # ─────────────────────────────────────────────────────────────────────────
   dashboard:
+    build: .
     image: b3-market-feeling-detector
     volumes:
       - pipeline_data:/app/data
