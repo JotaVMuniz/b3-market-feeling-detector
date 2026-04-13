@@ -2,7 +2,7 @@
 Streamlit Dashboard — B3 Market Feeling Detector
 
 Three-tab layout:
-  📊 Visão Geral  – Aggregated metrics and sentiment by market segment.
+  📊 Visão Geral  – Aggregated metrics, fundamentals ranking, and top news.
   📈 Por Ativo    – Asset-centric view: price history + related news.
   📰 Notícias     – Full news feed with sentiment filters.
 """
@@ -311,9 +311,138 @@ def load_fundamentals(ticker: str, db_path: str = DB_PATH) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ---------------------------------------------------------------------------
-# Segment helpers
-# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600)
+def load_fundamentals_ranking(db_path: str = DB_PATH) -> pd.DataFrame:
+    """Load and rank all tickers by a composite fundamentals score.
+
+    Pivots the ``asset_fundamentals`` table so each row represents one ticker,
+    then computes a composite score that rewards profitability (ROE, Margem
+    Líquida), income (DY), low valuation (P/L, P/VPA) and low leverage
+    (Dívida/PL).
+
+    Returns:
+        DataFrame with columns: ticker, composite_score, pl, pvpa, roe,
+        margem_liquida, dy, divida_pl.  Sorted by composite_score descending.
+    """
+    if not _table_exists("asset_fundamentals", db_path):
+        return pd.DataFrame()
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(
+            "SELECT ticker, key, value FROM asset_fundamentals "
+            "WHERE ticker != '__MACRO__'",
+            conn,
+        )
+        conn.close()
+    except Exception:
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Pivot: one row per ticker, one column per fundamental key
+    pivot = df.pivot_table(index="ticker", columns="key", values="value", aggfunc="first")
+    pivot = pivot.reset_index()
+    pivot.columns.name = None
+
+    # Keep only metrics useful for ranking
+    rank_cols = ["pl", "pvpa", "roe", "margem_liquida", "dy", "divida_pl"]
+    for col in rank_cols:
+        if col not in pivot.columns:
+            pivot[col] = float("nan")
+        else:
+            pivot[col] = pd.to_numeric(pivot[col], errors="coerce")
+
+    # Score each metric (0–1 after min-max normalisation within the universe)
+    # Higher is better: roe, margem_liquida, dy
+    # Lower is better (only for positive values): pl, pvpa, divida_pl
+
+    def _norm_higher_better(series: pd.Series) -> pd.Series:
+        s = series.copy()
+        s[s < 0] = float("nan")
+        mn, mx = s.min(), s.max()
+        if pd.isna(mn) or pd.isna(mx) or mn == mx:
+            return s.where(s.isna(), 0.5)
+        return (s - mn) / (mx - mn)
+
+    def _norm_lower_better(series: pd.Series) -> pd.Series:
+        s = series.copy()
+        s[s <= 0] = float("nan")  # negative or zero is penalised
+        mn, mx = s.min(), s.max()
+        if pd.isna(mn) or pd.isna(mx) or mn == mx:
+            return s.where(s.isna(), 0.5)
+        return 1.0 - (s - mn) / (mx - mn)
+
+    scores = pd.DataFrame({"ticker": pivot["ticker"]})
+    scores["s_roe"]     = _norm_higher_better(pivot["roe"])
+    scores["s_margem"]  = _norm_higher_better(pivot["margem_liquida"])
+    scores["s_dy"]      = _norm_higher_better(pivot["dy"])
+    scores["s_pl"]      = _norm_lower_better(pivot["pl"])
+    scores["s_pvpa"]    = _norm_lower_better(pivot["pvpa"])
+    scores["s_divida"]  = _norm_lower_better(pivot["divida_pl"])
+
+    score_cols = ["s_roe", "s_margem", "s_dy", "s_pl", "s_pvpa", "s_divida"]
+    scores["composite_score"] = scores[score_cols].mean(axis=1)
+
+    result = scores[["ticker", "composite_score"]].merge(
+        pivot[["ticker"] + rank_cols], on="ticker", how="left"
+    )
+    result = result.sort_values("composite_score", ascending=False).reset_index(drop=True)
+    result["rank"] = result.index + 1
+    return result
+
+
+@st.cache_data(ttl=300)
+def load_top_news(limit: int = 10, db_path: str = DB_PATH) -> pd.DataFrame:
+    """Load the top relevant news ordered by market_relevance and recency.
+
+    Returns the *limit* most relevant news items (``is_relevant = 1``) ordered
+    first by ``market_relevance`` descending, then by ``published_at``
+    descending.  Falls back gracefully when the ``market_relevance`` column
+    does not yet exist.
+    """
+    cols = _news_columns(db_path)
+
+    has_mr = "market_relevance" in cols
+
+    select = (
+        "id, title, content, source, published_at, url, collected_at, "
+        "sentiment, confidence, segments, tickers"
+        + (", market_relevance" if has_mr else "")
+    )
+
+    order = (
+        "ORDER BY market_relevance DESC, published_at DESC"
+        if has_mr
+        else "ORDER BY published_at DESC"
+    )
+
+    query = (
+        f"SELECT {select} FROM news "
+        f"WHERE is_relevant = 1 {order} LIMIT ?"
+    )
+
+    try:
+        conn = _conn(db_path)
+        df = pd.read_sql_query(query, conn, params=(limit,))
+        conn.close()
+    except Exception as e:
+        st.error(f"Erro ao carregar top notícias: {e}")
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df["published_at"] = pd.to_datetime(df["published_at"], errors="coerce")
+    for col in ("segments", "tickers"):
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: json.loads(x) if isinstance(x, str) and x else []
+            )
+    if not has_mr:
+        df["market_relevance"] = float("nan")
+
+    return df.reset_index(drop=True)
 
 def expand_segments(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "segments" not in df.columns:
@@ -603,11 +732,10 @@ def _candlestick_chart(price_df: pd.DataFrame, ticker: str):
 # ---------------------------------------------------------------------------
 
 def _render_overview_tab():
-    """📊 Home: aggregated metrics by segment."""
+    """📊 Home: aggregated KPIs, fundamentals ranking, and top news."""
     st.header("📊 Visão Geral do Mercado")
 
     df = load_news(limit=5000)
-    corr_df = load_correlations()
 
     if df.empty:
         st.info(
@@ -629,9 +757,6 @@ def _render_overview_tab():
     neu = int((df["sentiment"] == "neutro").sum()) if has_sentiment else total
 
     tickers_count = len(load_tickers())
-    segs_count = len(
-        {s for segs in df["segments"] for s in (segs if isinstance(segs, list) else [])}
-    )
 
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Total de Notícias", total)
@@ -648,47 +773,111 @@ def _render_overview_tab():
 
     st.divider()
 
-    # --- Segment table + price variations -----------------------------------
-    st.subheader("📦 Métricas por Segmento")
+    # --- Fundamentals ranking -----------------------------------------------
+    st.subheader("🏆 Rank Geral das Ações — Dados Fundamentalistas")
 
-    seg_stats = get_segment_stats(df)
-    seg_price = get_segment_price_stats(corr_df, df)
+    ranking_df = load_fundamentals_ranking()
 
-    if not seg_stats.empty:
-        if not seg_price.empty:
-            seg_stats = seg_stats.merge(seg_price[["segment", "avg_d0", "avg_d1", "avg_d5"]], on="segment", how="left")
+    if ranking_df.empty:
+        st.info(
+            "Dados fundamentalistas não disponíveis ainda. Execute:\n"
+            "```\npython main.py --stage fundamentals\n```"
+        )
+    else:
+        companies_df = load_companies()
+        ticker_to_name: Dict[str, str] = {}
+        if not companies_df.empty and "ticker" in companies_df.columns and "name" in companies_df.columns:
+            ticker_to_name = dict(zip(companies_df["ticker"], companies_df["name"]))
 
-        display = seg_stats.rename(columns={
-            "segment": "Segmento", "total": "Notícias",
-            "positivo": "Positivas", "negativo": "Negativas", "neutro": "Neutras",
-            "pct_positivo": "% Pos", "pct_negativo": "% Neg",
-            "confianca_media": "Confiança Méd.",
-            "avg_d0": "Var. D0 (%)", "avg_d1": "Var. D+1 (%)", "avg_d5": "Var. D+5 (%)",
-        })
-        # select columns that actually exist
+        display = ranking_df.head(30).copy()
+        display.insert(1, "Empresa", display["ticker"].map(lambda t: ticker_to_name.get(t, "")))
+
+        # Format columns for display
+        pct_cols = {"roe": "ROE (%)", "margem_liquida": "Margem Líq. (%)", "dy": "DY (%)"}
+        float_cols = {"pl": "P/L", "pvpa": "P/VPA", "divida_pl": "Dívida/PL"}
+
+        rename_map = {
+            "rank": "#",
+            "ticker": "Ticker",
+            "composite_score": "Score",
+            **{k: v for k, v in pct_cols.items()},
+            **{k: v for k, v in float_cols.items()},
+        }
+        display = display.rename(columns=rename_map)
+
+        for orig, label in pct_cols.items():
+            col = rename_map[orig]
+            if col in display.columns:
+                display[col] = display[col].apply(
+                    lambda v: f"{v * 100:.2f}%" if pd.notna(v) else "—"
+                )
+
+        for orig, label in float_cols.items():
+            col = rename_map[orig]
+            if col in display.columns:
+                display[col] = display[col].apply(
+                    lambda v: f"{v:.2f}" if pd.notna(v) else "—"
+                )
+
+        display["Score"] = display["Score"].apply(
+            lambda v: f"{v:.3f}" if pd.notna(v) else "—"
+        )
+
         show_cols = [c for c in [
-            "Segmento", "Notícias", "Positivas", "% Pos", "Negativas", "% Neg",
-            "Confiança Méd.", "Var. D0 (%)", "Var. D+1 (%)", "Var. D+5 (%)"
+            "#", "Ticker", "Empresa", "Score",
+            "ROE (%)", "Margem Líq. (%)", "DY (%)", "P/L", "P/VPA", "Dívida/PL"
         ] if c in display.columns]
+
         st.dataframe(display[show_cols], use_container_width=True, hide_index=True)
+        st.caption(
+            "Score composto calculado a partir de ROE, Margem Líquida, Dividend Yield, P/L, P/VPA e Dívida/PL "
+            "(normalização min-max no universo IBrX 100)."
+        )
 
-    # --- Charts row ---------------------------------------------------------
-    col_a, col_b = st.columns(2)
-    with col_a:
-        bar = _segment_bar(df)
-        if bar:
-            st.plotly_chart(bar, use_container_width=True)
-    with col_b:
-        hm = _segment_sentiment_heatmap(df)
-        if hm:
-            st.plotly_chart(hm, use_container_width=True)
-        elif not has_sentiment:
-            st.info("Mapa de calor disponível após análise de sentimento.")
+    st.divider()
 
-    # --- Sentiment over time ------------------------------------------------
-    ot = _sentiment_over_time(df)
-    if ot:
-        st.plotly_chart(ot, use_container_width=True)
+    # --- Top 10 most relevant news ------------------------------------------
+    st.subheader("📰 Top 10 Notícias Mais Relevantes")
+
+    top_news = load_top_news(limit=10)
+
+    if top_news.empty:
+        if not has_sentiment:
+            st.info(
+                "Nenhuma notícia relevante disponível ainda. "
+                "Execute `python main.py --stage trusted` para enriquecer as notícias."
+            )
+        else:
+            st.info("Nenhuma notícia relevante encontrada no momento.")
+    else:
+        for _, row in top_news.iterrows():
+            pub = row["published_at"].strftime("%d/%m/%Y %H:%M") if pd.notna(row["published_at"]) else "N/A"
+            sent = row.get("sentiment", "neutro") or "neutro"
+            color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
+            mr = row.get("market_relevance")
+            mr_str = f" · Relevância: {mr:.2f}" if pd.notna(mr) else ""
+
+            with st.expander(f"{color} {row['title']} — {row['source']} ({pub}){mr_str}"):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    content = row.get("content") or ""
+                    if content and content != row["title"]:
+                        st.markdown(content[:500] + ("…" if len(str(content)) > 500 else ""))
+                    st.markdown(f"[🔗 Leia mais]({row['url']})")
+                with col2:
+                    st.markdown(f"**Sentimento:** {sent}")
+                    conf = row.get("confidence", 0)
+                    if conf:
+                        st.markdown(f"**Confiança:** {conf:.2f}")
+                    if pd.notna(mr):
+                        st.markdown(f"**Relevância:** {mr:.2f}")
+                    segs = row.get("segments", [])
+                    if segs:
+                        st.markdown(f"**Segmentos:** {', '.join(segs)}")
+                    tks = row.get("tickers", [])
+                    if tks:
+                        st.markdown(f"**Tickers:** {', '.join(tks)}")
+                    st.markdown(f"**Publicado:** {pub}")
 
 
 def _render_asset_tab():
@@ -955,8 +1144,8 @@ def _render_asset_tab():
 
 
 def _render_news_tab():
-    """📰 Full news and X posts feed with sentiment filters."""
-    st.header("📰 Notícias & Posts — Sentimento do Mercado")
+    """📰 Full news feed with sentiment filters."""
+    st.header("📰 Notícias — Sentimento do Mercado")
 
     # --- Inline filters (previously in sidebar) ---------------------------------
     st.subheader("🔍 Filtros")
@@ -1054,15 +1243,13 @@ def _render_news_tab():
         sent = row.get("sentiment", "neutro") or "neutro"
         color = {"positivo": "🟢", "negativo": "🔴", "neutro": "🟡"}.get(sent, "⚪")
         source = row.get("source", "") or ""
-        source_icon = "🐦" if source == "X (Twitter)" else "📄"
-        link_label = "Ver post no X" if source == "X (Twitter)" else "Leia mais"
-        with st.expander(f"{color} {source_icon} {row['title']} — {source} ({pub})"):
+        with st.expander(f"{color} 📄 {row['title']} — {source} ({pub})"):
             col1, col2 = st.columns([3, 1])
             with col1:
                 content = row.get("content") or ""
                 if content and content != row["title"]:
                     st.markdown(content)
-                st.markdown(f"[🔗 {link_label}]({row['url']})")
+                st.markdown(f"[🔗 Leia mais]({row['url']})")
             with col2:
                 st.markdown(f"**Sentimento:** {sent}")
                 conf = row.get("confidence", 0)
@@ -1315,7 +1502,7 @@ def main():
         "📊 Visão Geral",
         "📈 Por Ativo",
         "🧭 Indicadores",
-        "📰 Notícias & Posts",
+        "📰 Notícias",
     ])
 
     with tab_overview:

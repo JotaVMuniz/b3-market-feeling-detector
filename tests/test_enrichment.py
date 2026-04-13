@@ -36,6 +36,7 @@ class TestEnrichmentClassifier:
 
         response = json.dumps({
             "is_relevant": True,
+            "market_relevance": 0.8,
             "sentiment": "positivo",
             "confidence": 0.9,
             "segments": ["bancos", "varejo"],
@@ -46,6 +47,7 @@ class TestEnrichmentClassifier:
 
         assert result == {
             "is_relevant": True,
+            "market_relevance": 0.8,
             "sentiment": "positivo",
             "confidence": 0.9,
             "segments": ["bancos", "varejo"],
@@ -63,6 +65,7 @@ class TestEnrichmentClassifier:
 
         assert result == {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -77,6 +80,7 @@ class TestEnrichmentClassifier:
 
         response = json.dumps({
             "is_relevant": True,
+            "market_relevance": 0.7,
             "sentiment": "positivo",
             "confidence": 0.7,
             "segments": ["bancos", "esporte"],
@@ -87,6 +91,7 @@ class TestEnrichmentClassifier:
 
         assert result == {
             "is_relevant": True,
+            "market_relevance": 0.7,
             "sentiment": "positivo",
             "confidence": 0.7,
             "segments": ["bancos"],
@@ -105,6 +110,7 @@ class TestEnrichNews:
 
         assert result == {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
@@ -138,6 +144,7 @@ class TestEnrichNews:
 
         assert result == {
             "is_relevant": False,
+            "market_relevance": 0.0,
             "sentiment": "neutro",
             "confidence": 0.0,
             "segments": [],
