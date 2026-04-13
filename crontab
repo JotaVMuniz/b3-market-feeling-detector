@@ -1,0 +1,5 @@
+# B3 Market Feeling Detector — daily pipeline schedule
+# Runs at 23:00 UTC (20:00 BRT) every day, after B3 market close.
+# Stdout/stderr are forwarded to Docker's logging via /proc/1/fd/1.
+PATH=/usr/local/bin:/usr/bin:/bin
+0 23 * * * root . /etc/environment ; cd /app && python main.py --stage all >> /proc/1/fd/1 2>&1

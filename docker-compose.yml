@@ -1,0 +1,30 @@
+services:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Pipeline — runs the full pipeline once a day via cron (23:00 UTC).
+  # ─────────────────────────────────────────────────────────────────────────
+  pipeline:
+    build: .
+    image: b3-market-feeling-detector
+    entrypoint: ["/app/entrypoint.sh"]
+    env_file:
+      - .env
+    volumes:
+      - pipeline_data:/app/data
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Dashboard — Streamlit UI, reads from the shared database volume.
+  # Reuses the image built by the pipeline service.
+  # ─────────────────────────────────────────────────────────────────────────
+  dashboard:
+    image: b3-market-feeling-detector
+    volumes:
+      - pipeline_data:/app/data
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    depends_on:
+      - pipeline
+
+volumes:
+  pipeline_data:
