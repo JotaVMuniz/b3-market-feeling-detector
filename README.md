@@ -30,7 +30,11 @@ b3-market-feeling-detector/
 ├── tests/                  # Suite de testes (pytest)
 ├── main.py                 # Orquestrador do pipeline
 ├── dashboard.py            # Dashboard Streamlit
-├── Dockerfile              # Imagem para Cloud Run
+├── Dockerfile              # Imagem Docker
+├── docker-compose.yml      # Compose: pipeline (cron) + dashboard (Streamlit)
+├── crontab                 # Agendamento cron diário (23:00 UTC)
+├── entrypoint.sh           # Entrypoint do container de pipeline
+├── .env.example            # Template de variáveis de ambiente
 └── requirements.txt
 ```
 
@@ -42,6 +46,90 @@ b3-market-feeling-detector/
 pip install -r requirements.txt
 cp .env.example .env   # preencha OPENAI_API_KEY
 ```
+
+---
+
+## Executando com Docker
+
+O projeto inclui um `docker-compose.yml` com dois serviços que compartilham um volume persistente para o banco SQLite:
+
+| Serviço | Função |
+|---------|--------|
+| `pipeline` | Executa `python main.py --stage all` todo dia às **23:00 UTC (20:00 BRT)** via cron |
+| `dashboard` | Serve o dashboard Streamlit em `http://localhost:8501` |
+
+### 1. Configure as variáveis de ambiente
+
+```bash
+cp .env.example .env
+# Edite .env e preencha OPENAI_API_KEY
+```
+
+### 2. Suba os containers
+
+> **⚠️ Sempre use `--build` na primeira execução** (ou após alterar o código).
+> Sem essa flag o Docker Desktop tenta baixar a imagem de um registry e retorna erro 500.
+
+```bash
+docker compose up --build -d
+```
+
+- O `pipeline` ficará em execução contínua; o cron dispara o pipeline uma vez ao dia.
+- O `dashboard` estará acessível em `http://localhost:8501`.
+
+### 3. Acompanhe os logs
+
+```bash
+# Logs do pipeline (cron + execução diária)
+docker compose logs -f pipeline
+
+# Logs do dashboard
+docker compose logs -f dashboard
+```
+
+### 4. Execute o pipeline manualmente (opcional)
+
+Para forçar uma execução imediata sem aguardar o horário do cron:
+
+```bash
+docker compose exec pipeline python main.py --stage all
+```
+
+Ou para um estágio específico:
+
+```bash
+docker compose exec pipeline python main.py --stage raw
+docker compose exec pipeline python main.py --stage prices
+```
+
+### 5. Expor o dashboard publicamente na web (ngrok)
+
+O servidor Streamlit já escuta em `0.0.0.0:8501`, então qualquer máquina na mesma rede local
+consegue acessar via `http://<ip-da-máquina>:8501`. Para expor na internet sem configurar
+infraestrutura de nuvem, use o [ngrok](https://ngrok.com/):
+
+```bash
+# Instale o ngrok (https://ngrok.com/download) e autentique uma vez
+ngrok config add-authtoken <seu-token>
+
+# Com os containers já rodando, abra um túnel para a porta 8501
+ngrok http 8501
+```
+
+O ngrok exibirá uma URL pública como `https://abcd1234.ngrok-free.app` — compartilhe esse
+link para que outros acessem o dashboard de qualquer lugar.
+
+> O link muda a cada vez que o ngrok é reiniciado. Para um endereço fixo, consulte os planos
+> pagos do ngrok ou hospede em um serviço de nuvem (ver seção **Arquitetura GCP**).
+
+### 6. Parar os containers
+
+```bash
+docker compose down
+```
+
+> O banco de dados fica no volume Docker `pipeline_data` e persiste entre reinicializações.
+> Para apagar todos os dados use `docker compose down -v`.
 
 ---
 
