@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 from main import (
     run_analytics,
+    run_composite_index,
     run_indicators,
     run_pipeline,
     run_prices,
@@ -485,3 +486,55 @@ class TestIndicatorCheckpoint:
             run_indicators()
 
         mock_b3.assert_not_called()
+
+    def test_does_not_compute_composite_index(self):
+        """run_indicators only ingests raw series; it must not touch the
+        composite index — that is run_composite_index's (analytics layer)
+        responsibility, so it can be recomputed without re-fetching data."""
+        mock_db = _make_mock_db()
+        mock_market_db = _make_mock_market_db()
+
+        with patch("main.NewsDatabase", return_value=mock_db), \
+             patch("main.MarketDatabase", return_value=mock_market_db), \
+             patch("main.fetch_market_indicators_range", return_value={}), \
+             patch("main.fetch_bcb_indicators", return_value=[]), \
+             patch("main.indicators_to_raw_records", return_value=[]), \
+             patch("main.compute_composite_index") as mock_compute:
+            run_indicators()
+
+        mock_compute.assert_not_called()
+        mock_market_db.get_indicators.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run_composite_index
+# ---------------------------------------------------------------------------
+
+class TestCompositeIndex:
+    """Analytics-layer composite index computation, decoupled from ingestion."""
+
+    def test_computes_and_stores_when_data_available(self):
+        mock_db = _make_mock_db()
+        mock_market_db = _make_mock_market_db()
+        mock_market_db.get_indicators.return_value = [{"date": "2026-03-26", "key": "turnover", "value": 1.0}]
+        composite_records = [{"date": "2026-03-26", "score": 55.0, "label": "Neutro"}]
+
+        with patch("main.NewsDatabase", return_value=mock_db), \
+             patch("main.MarketDatabase", return_value=mock_market_db), \
+             patch("main.compute_composite_index", return_value=composite_records) as mock_compute:
+            run_composite_index()
+
+        mock_compute.assert_called_once_with(mock_market_db.get_indicators.return_value)
+        mock_market_db.upsert_composite_index.assert_called_once_with(composite_records)
+
+    def test_skips_store_when_insufficient_data(self):
+        mock_db = _make_mock_db()
+        mock_market_db = _make_mock_market_db()
+        mock_market_db.get_indicators.return_value = []
+
+        with patch("main.NewsDatabase", return_value=mock_db), \
+             patch("main.MarketDatabase", return_value=mock_market_db), \
+             patch("main.compute_composite_index", return_value=[]):
+            run_composite_index()
+
+        mock_market_db.upsert_composite_index.assert_not_called()

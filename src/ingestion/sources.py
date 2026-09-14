@@ -25,7 +25,7 @@ FINANCIAL_SOURCES: List[RSSSource] = [
     ),
     RSSSource(
         name="Valor Globo",
-        url="https://valor.globo.com/rss/"
+        url="https://valor.globo.com/rss/valor"
     ),
     RSSSource(
         name="Exame",

@@ -1,31 +1,52 @@
 """
 Main orchestration module for the financial news ingestion pipeline.
 
-The pipeline is split into independent stages that can be run separately:
+The pipeline is organized in three data layers, in the spirit of a
+medallion/ETL architecture (RAW -> TRUSTED -> ANALYTICS):
 
-- raw:        Fetch news from RSS feeds, clean and persist raw records.
-- trusted:    Enrich stored news with NLP/LLM sentiment analysis.
-- cleanup:    Delete neutral-sentiment news older than 7 days.
-- prices:     Fetch B3 market prices (fully independent of news data).
-- indicators: Fetch sentiment indicators (turnover, TRIN, PCR, CDI, etc.)
-              and compute the composite Fear & Greed index.
-- analytics:  Compute news–price correlations from stored data.
-- backfill:   Download full B3 price history for a date range (all assets).
+- RAW:       Ingestion of unstructured, externally-sourced data whose
+             trustworthiness has not yet been established. Today this is
+             exclusively the financial news RSS feeds (``run_raw``).
+- TRUSTED:   Validation, curation and enrichment of data so it becomes
+             trustworthy for downstream use: LLM-based semantic enrichment
+             of news (``run_trusted``), retention cleanup (``run_cleanup``),
+             and ingestion of already-structured, authoritative market data
+             (IBrX universe, B3 prices, fundamentals, raw sentiment
+             indicator series) that only needs light validation to be
+             usable.
+- ANALYTICS: Derived/computed metrics built on top of the trusted dataset:
+             the composite sentiment index (``run_composite_index``) and
+             news-price correlation metrics (``run_analytics``).
+
+Each layer is exposed as a top-level ``--stage``; the ``--only`` flag
+selects a single sub-step within the TRUSTED or ANALYTICS layer for
+targeted/granular execution (e.g. recomputing the composite index without
+re-fetching indicators from B3/BCB).
 
 Usage::
 
     python main.py --stage raw
-    python main.py --stage trusted
-    python main.py --stage trusted --reprocess-existing
-    python main.py --stage cleanup
-    python main.py --stage prices
-    python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
-    python main.py --stage indicators
-    python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
-    python main.py --stage analytics
-    python main.py --stage backfill
+
+    python main.py --stage trusted                       # all trusted sub-steps
+    python main.py --stage trusted --only enrichment
+    python main.py --stage trusted --only enrichment --reprocess-existing
+    python main.py --stage trusted --only cleanup
+    python main.py --stage trusted --only ibrx
+    python main.py --stage trusted --only prices
+    python main.py --stage trusted --only prices --tickers PETR4,VALE3 --date 2026-04-01
+    python main.py --stage trusted --only fundamentals
+    python main.py --stage trusted --only fundamentals --tickers PETR4,VALE3
+    python main.py --stage trusted --only indicators
+    python main.py --stage trusted --only indicators --from 2025-01-01 --to 2025-12-31
+
+    python main.py --stage analytics                     # all analytics sub-steps
+    python main.py --stage analytics --only composite-index
+    python main.py --stage analytics --only correlation
+
+    python main.py --stage backfill                      # ad-hoc historical price seed
     python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
-    python main.py --stage all          # full pipeline (default)
+
+    python main.py --stage all          # full pipeline: raw -> trusted -> analytics (default)
     python main.py --stage all --no-market-data
 """
 
@@ -471,13 +492,19 @@ def run_indicators(
     end_date: Optional[datetime.date] = None,
 ) -> None:
     """
-    Stage 4 – Indicators: fetch sentiment indicators and compute the composite index.
+    Trusted layer – Indicators: fetch raw sentiment indicator series.
 
     Fetches market sentiment indicators from B3 (turnover, TRIN, PCR,
     % advancing stocks) and BCB (CDI rate, consumer confidence, CDS) for
-    the given date range, stores the raw values in ``sentiment_indicators``,
-    and then computes and stores the composite Fear & Greed index in
-    ``composite_sentiment_index``.
+    the given date range and stores the raw values in
+    ``sentiment_indicators``.
+
+    This stage is intentionally limited to ingestion/storage of the raw
+    series — it does **not** compute the composite index. That
+    computation is a derived/analytical step and lives in
+    :func:`run_composite_index`, so the (cheap, network-free) index can be
+    recomputed — e.g. after a change to the indicator weights — without
+    re-fetching data from B3/BCB.
 
     A **checkpoint** is applied when *start_date* is not explicitly set:
     the stage queries the most recent date already in ``sentiment_indicators``
@@ -554,9 +581,31 @@ def run_indicators(
     written_bcb = market_db.upsert_indicators(bcb_recs)
     logger.info(f"Stored {written_bcb} BCB indicator records in sentiment_indicators")
 
-    # ------------------------------------------------------------------
-    # Build composite index from all stored indicators
-    # ------------------------------------------------------------------
+    logger.info("Stage INDICATORS complete\n")
+
+
+def run_composite_index() -> None:
+    """
+    Analytics layer – Composite index: compute the composite sentiment index.
+
+    Reads every previously-stored indicator observation from
+    ``sentiment_indicators`` (populated by :func:`run_indicators`) and
+    computes the composite Fear & Greed-style index, storing the result in
+    ``composite_sentiment_index``.
+
+    This stage performs no network I/O: it is a pure recomputation over
+    already-trusted data, so it can be re-run cheaply and often — e.g.
+    immediately after adjusting the indicator weights in
+    ``compute_composite_index.py`` — without repeating the (slower,
+    rate-limited) B3/BCB fetch performed by :func:`run_indicators`.
+    """
+    logger.info("=" * 60)
+    logger.info("Stage: ANALYTICS — computing composite sentiment index")
+    logger.info("=" * 60)
+
+    db = NewsDatabase()
+    market_db = MarketDatabase(db_path=db.db_path)
+
     all_indicators = market_db.get_indicators()
     composite_records = compute_composite_index(all_indicators)
     if composite_records:
@@ -576,7 +625,7 @@ def run_indicators(
             "(need at least 10 historical observations per indicator)"
         )
 
-    logger.info("Stage INDICATORS complete\n")
+    logger.info("Stage ANALYTICS (composite-index) complete\n")
 
 
 def run_fundamentals(tickers: Optional[List[str]] = None) -> None:
@@ -704,34 +753,67 @@ def run_analytics() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator
+# Layer orchestrators
 # ---------------------------------------------------------------------------
+
+def run_raw_layer() -> None:
+    """RAW layer: ingest unstructured, externally-sourced financial news."""
+    run_raw()
+
+
+def run_trusted_layer(
+    reprocess_existing: bool = False,
+    fetch_market_data: bool = True,
+) -> None:
+    """
+    TRUSTED layer: validate/enrich news and curate the authoritative market
+    data (IBrX universe, prices, fundamentals, raw indicator series) used
+    downstream by the ANALYTICS layer.
+
+    Args:
+        reprocess_existing: Re-enrich all news records (not just unenriched ones).
+        fetch_market_data:  If False, skip every market-data sub-step and only
+                             run news enrichment + retention cleanup.
+    """
+    run_trusted(reprocess_all=reprocess_existing)
+    run_cleanup()
+    if fetch_market_data:
+        run_ibrx_tickers()
+        run_prices()
+        run_indicators()
+        run_fundamentals()
+
+
+def run_analytics_layer() -> None:
+    """ANALYTICS layer: derived metrics computed from the trusted dataset."""
+    run_composite_index()
+    run_analytics()
+
 
 def run_pipeline(reprocess_existing: bool = False, fetch_market_data: bool = True) -> None:
     """
-    Execute the full pipeline: raw -> trusted -> cleanup -> prices -> indicators -> analytics.
+    Execute the full pipeline: RAW -> TRUSTED -> ANALYTICS.
 
-    This function acts as an orchestrator that calls each stage in order.
-    It is preserved for backward compatibility.
+    This function acts as an orchestrator that calls each layer in order.
+    It is preserved for backward compatibility with ``--stage all``.
 
     Args:
-        reprocess_existing: Re-enrich all news records (trusted stage).
-        fetch_market_data:  If False, skip the prices, indicators and analytics stages.
+        reprocess_existing: Re-enrich all news records (trusted layer).
+        fetch_market_data:  If False, skip every market-data sub-step and the
+                             entire ANALYTICS layer.
     """
     logger.info("=" * 60)
-    logger.info("Starting full pipeline (raw -> trusted -> cleanup -> ibrx -> prices -> indicators -> fundamentals -> analytics)")
+    logger.info("Starting full pipeline (RAW -> TRUSTED -> ANALYTICS)")
     logger.info("=" * 60)
 
     try:
-        run_raw()
-        run_trusted(reprocess_all=reprocess_existing)
-        run_cleanup()
+        run_raw_layer()
+        run_trusted_layer(
+            reprocess_existing=reprocess_existing,
+            fetch_market_data=fetch_market_data,
+        )
         if fetch_market_data:
-            run_ibrx_tickers()
-            run_prices()
-            run_indicators()
-            run_fundamentals()
-            run_analytics()
+            run_analytics_layer()
 
         logger.info("=" * 60)
         logger.info("Full pipeline completed successfully")
@@ -753,19 +835,26 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   python main.py --stage raw
+
   python main.py --stage trusted
-  python main.py --stage trusted --reprocess-existing
-  python main.py --stage cleanup
-  python main.py --stage ibrx
-  python main.py --stage prices
-  python main.py --stage prices --tickers PETR4,VALE3 --date 2026-04-01
-  python main.py --stage indicators
-  python main.py --stage indicators --from 2025-01-01 --to 2025-12-31
-  python main.py --stage fundamentals
-  python main.py --stage fundamentals --tickers PETR4,VALE3
+  python main.py --stage trusted --only enrichment
+  python main.py --stage trusted --only enrichment --reprocess-existing
+  python main.py --stage trusted --only cleanup
+  python main.py --stage trusted --only ibrx
+  python main.py --stage trusted --only prices
+  python main.py --stage trusted --only prices --tickers PETR4,VALE3 --date 2026-04-01
+  python main.py --stage trusted --only fundamentals
+  python main.py --stage trusted --only fundamentals --tickers PETR4,VALE3
+  python main.py --stage trusted --only indicators
+  python main.py --stage trusted --only indicators --from 2025-01-01 --to 2025-12-31
+
   python main.py --stage analytics
+  python main.py --stage analytics --only composite-index
+  python main.py --stage analytics --only correlation
+
   python main.py --stage backfill
   python main.py --stage backfill --from 2025-01-01 --to 2025-12-31
+
   python main.py --stage all
   python main.py --stage all --no-market-data
 """,
@@ -773,36 +862,47 @@ Examples:
 
     parser.add_argument(
         '--stage',
-        choices=['raw', 'trusted', 'cleanup', 'prices', 'indicators', 'analytics', 'backfill', 'fundamentals', 'ibrx', 'all'],
+        choices=['raw', 'trusted', 'analytics', 'backfill', 'all'],
         default='all',
         help=(
-            'Pipeline stage to execute. '
-            '"all" runs every stage in sequence (default).'
+            'Pipeline layer to execute (raw / trusted / analytics), the ad-hoc '
+            '"backfill" tool, or "all" to run every layer in sequence (default).'
+        ),
+    )
+    parser.add_argument(
+        '--only',
+        choices=['enrichment', 'cleanup', 'ibrx', 'prices', 'fundamentals',
+                 'indicators', 'composite-index', 'correlation'],
+        default=None,
+        help=(
+            'Run a single sub-step within --stage trusted (enrichment, cleanup, '
+            'ibrx, prices, fundamentals, indicators) or --stage analytics '
+            '(composite-index, correlation), instead of the whole layer.'
         ),
     )
     parser.add_argument(
         '--reprocess-existing',
         action='store_true',
-        help='Re-enrich the entire news database (trusted / all stages only).',
+        help='Re-enrich the entire news database (trusted enrichment / all stages only).',
     )
     parser.add_argument(
         '--no-market-data',
         action='store_true',
-        help='Skip prices, indicators and analytics stages (all stage only).',
+        help='Skip every market-data sub-step and the whole analytics layer (all stage only).',
     )
     parser.add_argument(
         '--tickers',
         type=str,
         default=None,
         metavar='TICKER1,TICKER2',
-        help='Comma-separated tickers for the prices and fundamentals stages.',
+        help='Comma-separated tickers for the prices and fundamentals sub-steps.',
     )
     parser.add_argument(
         '--date',
         type=str,
         default=None,
         metavar='YYYY-MM-DD',
-        help='Single trading date for the prices stage (auto-detected if omitted).',
+        help='Single trading date for the prices sub-step (auto-detected if omitted).',
     )
     parser.add_argument(
         '--from',
@@ -810,7 +910,7 @@ Examples:
         type=str,
         default='2025-01-01',
         metavar='YYYY-MM-DD',
-        help='Start date for the backfill and indicators stages (default: 2025-01-01).',
+        help='Start date for the backfill tool and indicators sub-step (default: 2025-01-01).',
     )
     parser.add_argument(
         '--to',
@@ -818,7 +918,7 @@ Examples:
         type=str,
         default=None,
         metavar='YYYY-MM-DD',
-        help='End date for the backfill and indicators stages (default: today).',
+        help='End date for the backfill tool and indicators sub-step (default: today).',
     )
 
     args = parser.parse_args()
@@ -836,25 +936,52 @@ Examples:
         datetime.date.fromisoformat(args.to_date) if args.to_date else None
     )
 
+    _TRUSTED_SUBSTAGES = {'enrichment', 'cleanup', 'ibrx', 'prices', 'fundamentals', 'indicators'}
+    _ANALYTICS_SUBSTAGES = {'composite-index', 'correlation'}
+
     if args.stage == 'raw':
-        run_raw()
+        if args.only is not None:
+            parser.error('--only is not applicable to --stage raw (a single ingestion step).')
+        run_raw_layer()
+
     elif args.stage == 'trusted':
-        run_trusted(reprocess_all=args.reprocess_existing)
-    elif args.stage == 'cleanup':
-        run_cleanup()
-    elif args.stage == 'prices':
-        run_prices(tickers=_tickers_arg, dates=_dates_arg)
-    elif args.stage == 'indicators':
-        run_indicators(start_date=_from_date, end_date=_to_date)
+        if args.only is None:
+            run_trusted_layer(reprocess_existing=args.reprocess_existing)
+        elif args.only not in _TRUSTED_SUBSTAGES:
+            parser.error(f"--only {args.only} is not valid for --stage trusted "
+                         f"(choose one of: {', '.join(sorted(_TRUSTED_SUBSTAGES))})")
+        elif args.only == 'enrichment':
+            run_trusted(reprocess_all=args.reprocess_existing)
+        elif args.only == 'cleanup':
+            run_cleanup()
+        elif args.only == 'ibrx':
+            run_ibrx_tickers()
+        elif args.only == 'prices':
+            run_prices(tickers=_tickers_arg, dates=_dates_arg)
+        elif args.only == 'fundamentals':
+            run_fundamentals(tickers=_tickers_arg)
+        elif args.only == 'indicators':
+            run_indicators(start_date=_from_date, end_date=_to_date)
+
     elif args.stage == 'analytics':
-        run_analytics()
-    elif args.stage == 'fundamentals':
-        run_fundamentals(tickers=_tickers_arg)
-    elif args.stage == 'ibrx':
-        run_ibrx_tickers()
+        if args.only is None:
+            run_analytics_layer()
+        elif args.only not in _ANALYTICS_SUBSTAGES:
+            parser.error(f"--only {args.only} is not valid for --stage analytics "
+                         f"(choose one of: {', '.join(sorted(_ANALYTICS_SUBSTAGES))})")
+        elif args.only == 'composite-index':
+            run_composite_index()
+        elif args.only == 'correlation':
+            run_analytics()
+
     elif args.stage == 'backfill':
+        if args.only is not None:
+            parser.error('--only is not applicable to --stage backfill.')
         run_backfill(start_date=_from_date, end_date=_to_date)
+
     else:  # 'all'
+        if args.only is not None:
+            parser.error('--only is not applicable to --stage all.')
         run_pipeline(
             reprocess_existing=args.reprocess_existing,
             fetch_market_data=not args.no_market_data,

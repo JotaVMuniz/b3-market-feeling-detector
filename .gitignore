@@ -98,6 +98,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv*/
 env/
 venv/
 ENV/
@@ -134,6 +135,15 @@ dmypy.json
 data/raw/*.json
 data/processed/
 data/*.db
+data/*.csv
 pipeline.log
+logs/
 .pytest_cache/
 *.pyc
+
+# Personal/academic documents and private feedback — this is a code
+# repository, so word processor and slide files don't belong in it.
+*.docx
+*.pptx
+~$*
+feedbacks.txt

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Template de LaunchAgent (macOS) para executar o pipeline diariamente.
+
+    Antes de usar:
+      1. Copie este arquivo para ~/Library/LaunchAgents/com.b3marketfeeling.dailypipeline.plist
+      2. Substitua todos os /ABSOLUTE/PATH/TO/... pelos caminhos reais do seu clone
+         (o interpretador Python deve ser o do seu virtualenv, com as dependências
+         de requirements.txt já instaladas).
+      3. Carregue o agente:
+           launchctl load ~/Library/LaunchAgents/com.b3marketfeeling.dailypipeline.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.b3marketfeeling.dailypipeline</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ABSOLUTE/PATH/TO/b3-market-feeling-detector/.venv/bin/python3</string>
+        <string>main.py</string>
+        <string>--stage</string>
+        <string>all</string>
+    </array>
+
+    <!-- WorkingDirectory precisa apontar para a raiz do repositório: é de lá
+         que load_dotenv() lê o .env com a OPENAI_API_KEY, e onde vivem
+         data/news.db e logs/. -->
+    <key>WorkingDirectory</key>
+    <string>/ABSOLUTE/PATH/TO/b3-market-feeling-detector</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/ABSOLUTE/PATH/TO/b3-market-feeling-detector/logs/pipeline_daily.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/ABSOLUTE/PATH/TO/b3-market-feeling-detector/logs/pipeline_daily.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

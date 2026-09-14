@@ -768,7 +768,7 @@ def _render_overview_tab():
     if not has_sentiment:
         st.warning(
             "⚠️ Análise de sentimento ainda não executada. "
-            "Configure `OPENAI_API_KEY` e rode `python main.py --stage trusted`."
+            "Configure `OPENAI_API_KEY` e rode `python main.py --stage trusted --only enrichment`."
         )
 
     st.divider()
@@ -781,7 +781,7 @@ def _render_overview_tab():
     if ranking_df.empty:
         st.info(
             "Dados fundamentalistas não disponíveis ainda. Execute:\n"
-            "```\npython main.py --stage fundamentals\n```"
+            "```\npython main.py --stage trusted --only fundamentals\n```"
         )
     else:
         companies_df = load_companies()
@@ -845,7 +845,7 @@ def _render_overview_tab():
         if not has_sentiment:
             st.info(
                 "Nenhuma notícia relevante disponível ainda. "
-                "Execute `python main.py --stage trusted` para enriquecer as notícias."
+                "Execute `python main.py --stage trusted --only enrichment` para enriquecer as notícias."
             )
         else:
             st.info("Nenhuma notícia relevante encontrada no momento.")
@@ -1053,7 +1053,7 @@ def _render_asset_tab():
     else:
         st.info(
             "Sem dados fundamentalistas para este ativo. Execute:\n"
-            "```\npython main.py --stage fundamentals\n```"
+            "```\npython main.py --stage trusted --only fundamentals\n```"
         )
 
     # --- Macro context (Selic / IPCA) ---------------------------------------
@@ -1331,9 +1331,10 @@ def _render_indicators_tab():
     if composite_all_df.empty and indicators_df.empty:
         st.info(
             "🔄 Nenhum dado de indicadores disponível ainda. Execute o pipeline:\n"
-            "```\npython main.py --stage indicators\n```\n\n"
+            "```\npython main.py --stage trusted --only indicators\n```\n\n"
             "Para carregar histórico completo (≈1 ano necessário para o índice composto):\n"
-            "```\npython main.py --stage indicators --from 2024-01-01\n```"
+            "```\npython main.py --stage trusted --only indicators --from 2024-01-01\n"
+            "python main.py --stage analytics --only composite-index\n```"
         )
         return
 
